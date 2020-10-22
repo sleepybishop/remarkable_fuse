@@ -1,0 +1,6 @@
+[submodule "deps/struct"]
+	path = deps/struct
+	url = https://github.com/svperbeast/struct
+[submodule "deps/cJSON"]
+	path = deps/cJSON
+	url = https://github.com/DaveGamble/cJSON
