@@ -1,0 +1,9 @@
+*.o
+*.a
+*.svg
+.*.swp
+test
+remfs
+remfmt
+xochitl
+remarkable
