@@ -7,7 +7,7 @@ This allows you to backup the remarkable while still retaining access to your do
 It's also helpful for running external tools like handwriting recognition on your documents. 
 
 ### Features
- - Provides tree view of documents are they appear in the interface.
+ - Provides tree view of documents as they appear in the interface.
  - Notebooks and PDF/EPUB annotations exposed as folders.
  - Auto conversion of `.rm` files to SVG.
  - Each notebook or annotation page is exposed as an individual SVG.
