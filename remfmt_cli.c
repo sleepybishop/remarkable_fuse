@@ -6,8 +6,10 @@
 #include "remfmt.h"
 
 int main(int argc, char *argv[]) {
-  if (argc < 2)
-    fprintf(stderr, "usage: %s <input.rm>\n", argv[0]);
+  if (argc < 3) {
+    fprintf(stderr, "usage: %s <input.rm> (svg|rm5)\n", argv[0]);
+    exit(1);
+  }
 
   FILE *in = fopen(argv[1], "rb");
   FILE *out = stdout;
@@ -16,8 +18,15 @@ int main(int argc, char *argv[]) {
     return -1;
 
   remfmt_stroke_vec *strokes = remfmt_parse(in);
-  if (strokes)
-    remfmt_render(out, strokes, NULL);
+  if (strokes) {
+    if (strcmp(argv[2], "svg") == 0) {
+      remfmt_render_svg(out, strokes, NULL);
+    } else if (strcmp(argv[2], "png") == 0) {
+      remfmt_render_png(out, strokes, NULL);
+    } else {
+      remfmt_render_rm5(out, strokes);
+    }
+  }
 
   remfmt_stroke_cleanup(strokes);
   fclose(in);

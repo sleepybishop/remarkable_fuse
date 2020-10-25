@@ -1,6 +1,8 @@
 #include "remfmt.h"
 #include "struct.h"
 
+static const char rmv5_magic[] = "reMarkable .lines file, version=%d          ";
+
 static uint32_t svg_color[] = {0x000000, 0x7d7d7d, 0xffffff, 0x880000,
                                0x884400, 0xebcb8b, 0x006600, 0x7d007d,
                                0x000088, 0x0000aa};
@@ -109,8 +111,40 @@ static float get_seg_alpha(remfmt_stroke *st, remfmt_seg *sg) {
   return clampf(alpha, 0.0, 1.0);
 }
 
-void remfmt_render(FILE *stream, remfmt_stroke_vec *strokes,
-                   remfmt_render_params *prm) {
+void remfmt_render_rm5(FILE *stream, remfmt_stroke_vec *strokes) {
+  char buf[64] = {0};
+  snprintf(buf, 44, rmv5_magic, 5);
+  fwrite(buf, 1, 43, stream);
+
+  unsigned num_layers = kv_A(*strokes, strokes->n - 1).layer + 1;
+  struct_pack(buf, "<I", num_layers);
+  fwrite(buf, 4, 1, stream);
+  for (int l = 0; l < num_layers; l++) {
+    int num_strokes = kv_size(*strokes);
+    struct_pack(buf, "<I", num_strokes);
+    fwrite(buf, 4, 1, stream);
+
+    for (int i = 0; i < num_strokes; i++) {
+      remfmt_stroke *st = &kv_A(*strokes, i);
+      int num_segments = kv_size(st->segments);
+      struct_pack(buf, "<IIfffI", st->pen, st->color, st->unk1, st->width,
+                  st->unk2, num_segments);
+      fwrite(buf, 4, 6, stream);
+      for (int j = 0; j < num_segments; j++) {
+        remfmt_seg *sg = &kv_A(st->segments, j);
+        struct_pack(buf, "<ffffff", sg->x, sg->y, sg->speed, sg->tilt,
+                    sg->width, sg->pressure);
+        fwrite(buf, 4, 6, stream);
+      }
+    }
+  }
+}
+
+void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
+                       remfmt_render_params *prm) {}
+
+void remfmt_render_svg(FILE *stream, remfmt_stroke_vec *strokes,
+                       remfmt_render_params *prm) {
   kstr tpl_path = {0, 0, 0};
   const char brush_pat[] = "none";
   if (prm && prm->template_name && prm->template_name[0] != '\0') {
@@ -181,10 +215,9 @@ void remfmt_stroke_cleanup(remfmt_stroke_vec *strokes) {
 }
 
 remfmt_stroke_vec *remfmt_parse(FILE *stream) {
-  const char magic[] = "reMarkable .lines file, version=%d";
   char buf[64] = {0};
   int got, version = 0, num_layers = 0;
-  if (fscanf(stream, magic, &version) == 0)
+  if (fscanf(stream, rmv5_magic, &version) == 0)
     return NULL;
   if (version != 3 && version != 5)
     return NULL;
