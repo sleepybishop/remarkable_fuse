@@ -46,9 +46,9 @@ typedef struct {
 typedef kvec_t(remfmt_seg) remfmt_seg_vec;
 
 typedef struct {
-  int layer;
-  int pen;
-  int color;
+  unsigned layer;
+  unsigned pen;
+  unsigned color;
   float unk1;
   float unk2;
   float width;
@@ -62,8 +62,11 @@ typedef struct {
 
 typedef kvec_t(remfmt_stroke) remfmt_stroke_vec;
 
-void remfmt_render(FILE *stream, remfmt_stroke_vec *strokes,
-                   remfmt_render_params *prm);
+void remfmt_render_rm5(FILE *stream, remfmt_stroke_vec *strokes);
+void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
+                       remfmt_render_params *prm);
+void remfmt_render_svg(FILE *stream, remfmt_stroke_vec *strokes,
+                       remfmt_render_params *prm);
 void remfmt_stroke_cleanup(remfmt_stroke_vec *strokes);
 remfmt_stroke_vec *remfmt_parse(FILE *stream);
 

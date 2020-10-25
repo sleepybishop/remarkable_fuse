@@ -226,7 +226,7 @@ static int generate_fake_svg(uuid_map_node *ref, const char *rmpath,
                                 .annotation = anot,
                                 .hilite_color = YELLOW,
                                 .note_color = BLUE};
-    remfmt_render(ref->sh, strokes, &prm);
+    remfmt_render_svg(ref->sh, strokes, &prm);
   }
   remfmt_stroke_cleanup(strokes);
   fclose(in);
