@@ -116,7 +116,7 @@ void remfmt_render_rm5(FILE *stream, remfmt_stroke_vec *strokes) {
   snprintf(buf, 44, rmv5_magic, 5);
   fwrite(buf, 1, 43, stream);
 
-  unsigned num_layers = kv_A(*strokes, strokes->n - 1).layer + 1;
+  int num_layers = kv_A(*strokes, strokes->n - 1).layer + 1;
   struct_pack(buf, "<I", num_layers);
   fwrite(buf, 4, 1, stream);
   for (int l = 0; l < num_layers; l++) {
@@ -184,7 +184,6 @@ void remfmt_render_svg(FILE *stream, remfmt_stroke_vec *strokes,
       seg_alpha = get_seg_alpha(&st, &sg);
 
       kstr_cat(&pv, fmt, x, y);
-      // FIXME: SEG BREAKS
       if (lsw != seg_width) {
         fprintf(stream, svg_tpl[SVG_POLYLINE], seg_color, seg_width, seg_alpha,
                 st.square_cap ? "square" : "round", pv.a);
