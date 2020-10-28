@@ -1,5 +1,6 @@
 #define FUSE_USE_VERSION 26
 
+#include <assert.h>
 #include <errno.h>
 #include <fuse.h>
 #include <signal.h>
@@ -18,6 +19,19 @@
 #define IS_SVG (1 << 0)
 #define IS_ANNOT_DIR (1 << 1)
 #define IS_ANNOT_PAGE (1 << 2)
+
+#define DEFAULT_SOURCE "./xochitl"
+
+static struct options {
+  const char *src_dir;
+  int show_help;
+} options;
+
+#define OPTION(t, p)                                                           \
+  { t, offsetof(struct options, p), 1 }
+static const struct fuse_opt option_spec[] = {
+    OPTION("--source=%s", src_dir), OPTION("-h", show_help),
+    OPTION("--help", show_help), FUSE_OPT_END};
 
 static kstr munge_path(const char *path, int *flags) {
   kstr ret = {0, 0, 0};
@@ -236,8 +250,8 @@ static int remfuse_read(const char *path, char *buf, size_t size, off_t offset,
 }
 
 static void *remfuse_init(struct fuse_conn_info *conn) {
-  remfs_ctx *ctx = remfs_init("./xochitl"); // FIXME
-  //remfs_print(ctx, stderr);
+  remfs_ctx *ctx = remfs_init(options.src_dir);
+  // remfs_print(ctx, stderr);
   return ctx;
 }
 
@@ -256,10 +270,49 @@ static struct fuse_operations remfuse_ops = {
     .destroy = remfuse_destroy,
 };
 
+static void usage(const char *progname) {
+  printf("usage: %s [options] <mountpoint>\n\n", progname);
+  printf("File-system specific options:\n"
+         "    --source=<s>        location of data dir\n"
+         "                        (default: \"%s\")\n"
+         "\n",
+         DEFAULT_SOURCE);
+}
+
 int main(int argc, char *argv[]) {
-  int ret;
+  int ret = 1;
   struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-  ret = fuse_main(argc, argv, &remfuse_ops, NULL);
+  struct stat stbuf;
+
+  options.src_dir = DEFAULT_SOURCE;
+
+  if (fuse_opt_parse(&args, &options, option_spec, NULL) == -1)
+    goto cleanup;
+
+  if (options.show_help) {
+    usage(argv[0]);
+    assert(fuse_opt_add_arg(&args, "--help") == 0);
+    args.argv[0][0] = '\0';
+  } else if (options.src_dir) {
+    if (stat(options.src_dir, &stbuf) == -1) {
+      fprintf(stderr, "failed to access source dir [%s]: %s\n", options.src_dir,
+              strerror(errno));
+      goto cleanup;
+    }
+    if (!S_ISDIR(stbuf.st_mode)) {
+      fprintf(stderr, "source dir [%s] is not a directory\n", options.src_dir);
+      goto cleanup;
+    }
+    /*
+    if (options.src_dir && options.src_dir[0] != '/') {
+      fprintf(stderr, "source dir [%s] is not an absolute path\n",
+              options.src_dir);
+      goto cleanup;
+    }
+    */
+  }
+  ret = fuse_main(args.argc, args.argv, &remfuse_ops, NULL);
+cleanup:
   fuse_opt_free_args(&args);
   return ret;
 }
