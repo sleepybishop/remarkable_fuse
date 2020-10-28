@@ -14,41 +14,6 @@
 #include "kstr.h"
 #include "remfmt.h"
 #include "remfs.h"
-#include "tree.h"
-
-typedef struct uuid_map_node {
-  remfs_file *file;
-  char *path;
-  cJSON *members;
-  FILE *sh;
-  int flags;
-  RB_ENTRY(uuid_map_node) fwdp;
-  RB_ENTRY(uuid_map_node) revp;
-} uuid_map_node;
-
-typedef RB_HEAD(uuid_fwd_map, uuid_map_node) uuid_fwd_map;
-typedef RB_HEAD(uuid_rev_map, uuid_map_node) uuid_rev_map;
-
-static int uuid_map_node_fwd_cmp(const uuid_map_node *a,
-                                 const uuid_map_node *b) {
-  return strcmp(a->file->uuid, b->file->uuid);
-}
-
-static int uuid_map_node_rev_cmp(const uuid_map_node *a,
-                                 const uuid_map_node *b) {
-  return strcmp(a->path, b->path);
-}
-
-RB_GENERATE(uuid_fwd_map, uuid_map_node, fwdp, uuid_map_node_fwd_cmp);
-RB_GENERATE(uuid_rev_map, uuid_map_node, revp, uuid_map_node_rev_cmp);
-
-typedef struct {
-  char *src_dir;
-  remfs_file_vec fv;
-  uuid_fwd_map *fwd_map;
-  uuid_rev_map *rev_map;
-  cJSON *members;
-} remfs_ctx;
 
 #define IS_SVG (1 << 0)
 #define IS_ANNOT_DIR (1 << 1)
@@ -78,42 +43,31 @@ static kstr munge_path(const char *path, int *flags) {
   return ret;
 }
 
-static uuid_map_node *path_search(remfs_ctx *ctx, const char *path, kstr *ret) {
-  int flags = 0;
-  kstr qp = munge_path(path, &flags);
-  uuid_map_node *s, q;
-  q.path = qp.a;
-  s = RB_FIND(uuid_rev_map, ctx->rev_map, &q);
-  if (s && ret) {
-    s->flags = flags;
-    if (s->file->type == COLLECTION) {
-      kstr_cat(ret, "%s", ctx->src_dir);
+static uuid_map_node *rewrite_path(remfs_ctx *ctx, const char *path, int *flags,
+                                   kstr *newpath) {
+  kstr munged = munge_path(path, flags);
+  uuid_map_node *ref = remfs_path_search(ctx, munged.a);
+  if (ref && newpath) {
+    if (ref->file->type == COLLECTION) {
+      kstr_cat(newpath, "%s", ctx->src_dir);
     } else {
       const char *exts[] = {"", "", ".epub", ".pdf", ".rm"};
-      kstr_cat(ret, "%s/", ctx->src_dir);
-      if (s->file->filetype == PAGE) {
-        kstr_cat(ret, "%s/", s->file->parent);
+      kstr_cat(newpath, "%s/", ctx->src_dir);
+      if (ref->file->filetype == PAGE) {
+        kstr_cat(newpath, "%s/", ref->file->parent);
       }
-      if (flags & IS_ANNOT_DIR) {
-        kstr_cat(ret, "%s", s->file->uuid);
+      if (*flags & IS_ANNOT_DIR) {
+        kstr_cat(newpath, "%s", ref->file->uuid);
       } else {
-        kstr_cat(ret, "%s%s", s->file->uuid, exts[s->file->filetype]);
+        kstr_cat(newpath, "%s%s", ref->file->uuid, exts[ref->file->filetype]);
       }
     }
   }
-  if (qp.a)
-    kv_destroy(qp);
-  return s;
+  kv_destroy(munged);
+  return ref;
 }
 
-static uuid_map_node *uuid_search(remfs_ctx *ctx, const char *uuid) {
-  remfs_file file = {0};
-  uuid_map_node q = {.file = &file};
-  sprintf(file.uuid, "%s", uuid);
-  return RB_FIND(uuid_fwd_map, ctx->fwd_map, &q);
-}
-
-static int remfs_getattr(const char *path, struct stat *stbuf) {
+static int remfuse_getattr(const char *path, struct stat *stbuf) {
   int ret = -ENOENT;
   struct fuse_context *fuse_ctx = fuse_get_context();
   remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
@@ -121,24 +75,25 @@ static int remfs_getattr(const char *path, struct stat *stbuf) {
   if (strcmp(path, "/") == 0) {
     ret = stat(ctx->src_dir, stbuf);
   } else {
-    kstr munged = {0, 0, 0};
-    uuid_map_node *ref = path_search(ctx, path, &munged);
-    if (munged.a) {
+    int flags = 0;
+    kstr newpath = {0, 0, 0};
+    uuid_map_node *ref = rewrite_path(ctx, path, &flags, &newpath);
+    if (newpath.a) {
       if (ref) {
-        if ((ref->flags & IS_SVG)) {
+        if ((flags & IS_SVG)) {
           if (ref->sh) {
             ret = fstat(fileno(ref->sh), stbuf);
           } else {
-            ret = stat(munged.a, stbuf);
+            ret = stat(newpath.a, stbuf);
             // hack for empty pages
             if (ret == 0)
               stbuf->st_size = 2 * 1024 * 1024;
           }
         } else {
-          ret = stat(munged.a, stbuf);
+          ret = stat(newpath.a, stbuf);
         }
       }
-      kv_destroy(munged);
+      kv_destroy(newpath);
     }
   }
   // force read only
@@ -155,7 +110,8 @@ static cJSON *get_dir_entries(remfs_ctx *ctx, const char *path) {
   if (strcmp(path, "/") == 0) {
     n = ctx->members;
   } else {
-    uuid_map_node *ref = path_search(ctx, path, NULL);
+    int flags = 0;
+    uuid_map_node *ref = rewrite_path(ctx, path, &flags, NULL);
     if (ref)
       n = ref->members;
   }
@@ -178,8 +134,8 @@ static void fill_fake_folder(void *buf, fuse_fill_dir_t filler,
   kv_destroy(tmp);
 }
 
-static int remfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
-                         off_t offset, struct fuse_file_info *fi) {
+static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+                           off_t offset, struct fuse_file_info *fi) {
   struct fuse_context *fuse_ctx = fuse_get_context();
   remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
 
@@ -193,7 +149,7 @@ static int remfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
   cJSON *p = NULL;
   cJSON_ArrayForEach(p, n) {
     char *uuid = cJSON_GetStringValue(p);
-    uuid_map_node *s = uuid_search(ctx, uuid);
+    uuid_map_node *s = remfs_uuid_search(ctx, uuid);
     if (!s)
       continue;
     if (s->file->filetype == PAGE) {
@@ -209,7 +165,7 @@ static int remfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 static int generate_fake_svg(uuid_map_node *ref, const char *rmpath,
                              bool anot) {
-  char svgp[] = "/tmp/remfs_svg_XXXXXX";
+  char svgp[] = "/tmp/remfuse_svg_XXXXXX";
   int fd = mkstemp(svgp);
   FILE *in = NULL;
 
@@ -234,20 +190,20 @@ static int generate_fake_svg(uuid_map_node *ref, const char *rmpath,
   return fd;
 }
 
-static int remfs_open(const char *path, struct fuse_file_info *fi) {
+static int remfuse_open(const char *path, struct fuse_file_info *fi) {
   struct fuse_context *fuse_ctx = fuse_get_context();
   remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
-  int fd = -1;
-  kstr munged = {0, 0, 0};
-  uuid_map_node *ref = path_search(ctx, path, &munged);
-  if (ref && (ref->flags & IS_SVG)) {
-    fd = generate_fake_svg(ref, munged.a, ref->flags & IS_ANNOT_PAGE);
+  int fd = -1, flags = 0;
+  kstr newpath = {0, 0, 0};
+  uuid_map_node *ref = rewrite_path(ctx, path, &flags, &newpath);
+  if (ref && (flags & IS_SVG)) {
+    fd = generate_fake_svg(ref, newpath.a, flags & IS_ANNOT_PAGE);
   } else {
-    if (!munged.a)
+    if (!newpath.a)
       return -1;
-    fd = open(munged.a, fi->flags);
+    fd = open(newpath.a, fi->flags);
   }
-  kv_destroy(munged);
+  kv_destroy(newpath);
 
   if (fd == -1)
     return -errno;
@@ -256,10 +212,11 @@ static int remfs_open(const char *path, struct fuse_file_info *fi) {
   return 0;
 }
 
-static int remfs_release(const char *path, struct fuse_file_info *fi) {
+static int remfuse_release(const char *path, struct fuse_file_info *fi) {
   struct fuse_context *fuse_ctx = fuse_get_context();
   remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
-  uuid_map_node *ref = path_search(ctx, path, NULL);
+  int flags = 0;
+  uuid_map_node *ref = rewrite_path(ctx, path, &flags, NULL);
   if (ref->sh) {
     fclose(ref->sh);
     ref->sh = NULL;
@@ -269,8 +226,8 @@ static int remfs_release(const char *path, struct fuse_file_info *fi) {
   return 0;
 }
 
-static int remfs_read(const char *path, char *buf, size_t size, off_t offset,
-                      struct fuse_file_info *fi) {
+static int remfuse_read(const char *path, char *buf, size_t size, off_t offset,
+                        struct fuse_file_info *fi) {
   int ret;
   ret = pread(fi->fh, buf, size, offset);
   if (ret == -1)
@@ -278,135 +235,31 @@ static int remfs_read(const char *path, char *buf, size_t size, off_t offset,
   return ret;
 }
 
-static char *gen_path(remfs_ctx *ctx, size_t idx) {
-  remfs_file *file = &kv_A(ctx->fv, idx);
-  kvec_t(char *) stk = {0, 0, 0};
-  kstr fp = {0, 0, 0};
-
-  if (file->parent[0] == '\0') {
-    kstr_cat(&fp, "/%s", file->visible_name);
-  } else {
-    kv_push(char *, stk, file->visible_name);
-    uuid_map_node *ref = uuid_search(ctx, file->parent);
-    while (ref != NULL) {
-      kv_push(char *, stk, ref->file->visible_name);
-      ref = uuid_search(ctx, ref->file->parent);
-    }
-    while (kv_size(stk) > 0)
-      kstr_cat(&fp, "/%s", kv_pop(stk));
-  }
-  kv_destroy(stk);
-  return fp.a;
-}
-
-static void add_member(remfs_ctx *ctx, size_t idx, cJSON *root) {
-  remfs_file *file = &kv_A(ctx->fv, idx);
-
-  if (file->parent[0] == '\0') {
-    cJSON *p = cJSON_CreateString(file->uuid);
-    cJSON_AddItemToArray(root, p);
-  } else {
-    cJSON *n = NULL;
-    uuid_map_node *ref = uuid_search(ctx, file->parent);
-    if (!ref)
-      return;
-    n = ref->members;
-    cJSON *p = cJSON_CreateString(file->uuid);
-    if (!n) {
-      n = cJSON_CreateArray();
-      ref->members = n;
-    }
-    cJSON_AddItemToArray(n, p);
-  }
-}
-
-static void *remfs_init(struct fuse_conn_info *conn) {
-  remfs_ctx *ctx = calloc(1, sizeof(remfs_ctx));
-  ctx->src_dir = strdup("./xochitl"); // FIXME CONFIG
-  struct stat stbuf;
-  kstr tmp = {0, 0, 0};
-
-  remfs_list(ctx->src_dir, &ctx->fv);
-  ctx->fwd_map = calloc(1, sizeof(uuid_fwd_map));
-  ctx->rev_map = calloc(1, sizeof(uuid_rev_map));
-
-  RB_INIT(ctx->fwd_map);
-  RB_INIT(ctx->rev_map);
-
-  ctx->members = cJSON_CreateArray();
-  for (int i = 0; i < kv_size(ctx->fv); i++) {
-    remfs_file *file = &kv_A(ctx->fv, i);
-    if (file->deleted)
-      continue;
-    tmp.n = 0;
-    if (file->filetype == PAGE) {
-      kstr_cat(&tmp, "%s/%s/%s.rm", ctx->src_dir, file->parent, file->uuid);
-    } else {
-      kstr_cat(&tmp, "%s/%s.metadata", ctx->src_dir, file->uuid);
-    }
-    if (stat(tmp.a, &stbuf) == -1)
-      continue;
-    uuid_map_node *s = calloc(1, sizeof(uuid_map_node));
-    s->file = file;
-    RB_INSERT(uuid_fwd_map, ctx->fwd_map, s);
-  }
-
-  for (int i = 0; i < kv_size(ctx->fv); i++) {
-    remfs_file *file = &kv_A(ctx->fv, i);
-    uuid_map_node *s = uuid_search(ctx, file->uuid);
-    if (s == NULL)
-      continue;
-    s->path = gen_path(ctx, i);
-    RB_INSERT(uuid_rev_map, ctx->rev_map, s);
-    add_member(ctx, i, ctx->members);
-  }
-  kv_destroy(tmp);
-  /*
-  uuid_map_node *n;
-  RB_FOREACH(n, uuid_rev_map, ctx->rev_map)
-  fprintf(stderr, "%s->%s\n", n->path, n->file->uuid);
-  */
+static void *remfuse_init(struct fuse_conn_info *conn) {
+  remfs_ctx *ctx = remfs_init("./xochitl"); // FIXME
+  //remfs_print(ctx, stderr);
   return ctx;
 }
 
-static void destroy_maps(remfs_ctx *ctx) {
-  uuid_map_node *n, *nxt;
-  for (n = RB_MIN(uuid_rev_map, ctx->rev_map); n != NULL; n = nxt) {
-    nxt = RB_NEXT(uuid_rev_map, ctx->rev_map, n);
-    RB_REMOVE(uuid_rev_map, ctx->rev_map, n);
-    cJSON_Delete(n->members);
-    free(n->path);
-    free(n);
-  }
-  free(ctx->rev_map);
-  free(ctx->fwd_map);
-}
-
-static void remfs_destroy(void *arg) {
+static void remfuse_destroy(void *arg) {
   remfs_ctx *ctx = (remfs_ctx *)arg;
-  if (ctx) {
-    destroy_maps(ctx);
-    cJSON_Delete(ctx->members);
-    kv_destroy(ctx->fv);
-    free(ctx->src_dir);
-    free(ctx);
-  }
+  remfs_destroy(ctx);
 }
 
-static struct fuse_operations remfs_ops = {
-    .getattr = remfs_getattr,
-    .readdir = remfs_readdir,
-    .open = remfs_open,
-    .release = remfs_release,
-    .read = remfs_read,
-    .init = remfs_init,
-    .destroy = remfs_destroy,
+static struct fuse_operations remfuse_ops = {
+    .getattr = remfuse_getattr,
+    .readdir = remfuse_readdir,
+    .open = remfuse_open,
+    .release = remfuse_release,
+    .read = remfuse_read,
+    .init = remfuse_init,
+    .destroy = remfuse_destroy,
 };
 
 int main(int argc, char *argv[]) {
   int ret;
   struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-  ret = fuse_main(argc, argv, &remfs_ops, NULL);
+  ret = fuse_main(argc, argv, &remfuse_ops, NULL);
   fuse_opt_free_args(&args);
   return ret;
 }
