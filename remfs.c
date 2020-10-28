@@ -1,10 +1,154 @@
 #include <glob.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include "cJSON.h"
 #include "remfs.h"
 #include "struct.h"
+
+static int uuid_map_node_fwd_cmp(const uuid_map_node *a,
+                                 const uuid_map_node *b) {
+  return strcmp(a->file->uuid, b->file->uuid);
+}
+
+static int uuid_map_node_rev_cmp(const uuid_map_node *a,
+                                 const uuid_map_node *b) {
+  return strcmp(a->path, b->path);
+}
+
+RB_GENERATE(uuid_fwd_map, uuid_map_node, fwdp, uuid_map_node_fwd_cmp);
+RB_GENERATE(uuid_rev_map, uuid_map_node, revp, uuid_map_node_rev_cmp);
+
+uuid_map_node *remfs_path_search(remfs_ctx *ctx, const char *path) {
+  uuid_map_node q = {.path = (char *)path};
+  return RB_FIND(uuid_rev_map, ctx->rev_map, &q);
+}
+
+uuid_map_node *remfs_uuid_search(remfs_ctx *ctx, const char *uuid) {
+  remfs_file file = {0};
+  uuid_map_node q = {.file = &file};
+  sprintf(file.uuid, "%s", uuid);
+  return RB_FIND(uuid_fwd_map, ctx->fwd_map, &q);
+}
+
+static void empty_maps(remfs_ctx *ctx) {
+  uuid_map_node *n, *nxt;
+  for (n = RB_MIN(uuid_rev_map, ctx->rev_map); n != NULL; n = nxt) {
+    nxt = RB_NEXT(uuid_rev_map, ctx->rev_map, n);
+    RB_REMOVE(uuid_rev_map, ctx->rev_map, n);
+    cJSON_Delete(n->members);
+    free(n->path);
+    free(n);
+  }
+  free(ctx->rev_map);
+  free(ctx->fwd_map);
+}
+
+void remfs_destroy(remfs_ctx *ctx) {
+  if (ctx) {
+    empty_maps(ctx);
+    cJSON_Delete(ctx->members);
+    kv_destroy(ctx->fv);
+    free(ctx->src_dir);
+    free(ctx);
+  }
+}
+
+static char *gen_path(remfs_ctx *ctx, size_t idx) {
+  remfs_file *file = &kv_A(ctx->fv, idx);
+  kvec_t(char *) stk = {0, 0, 0};
+  kstr fp = {0, 0, 0};
+
+  if (file->parent[0] == '\0') {
+    kstr_cat(&fp, "/%s", file->visible_name);
+  } else {
+    kv_push(char *, stk, file->visible_name);
+    uuid_map_node *ref = remfs_uuid_search(ctx, file->parent);
+    while (ref != NULL) {
+      kv_push(char *, stk, ref->file->visible_name);
+      ref = remfs_uuid_search(ctx, ref->file->parent);
+    }
+    while (kv_size(stk) > 0)
+      kstr_cat(&fp, "/%s", kv_pop(stk));
+  }
+  kv_destroy(stk);
+  return fp.a;
+}
+
+static void add_member(remfs_ctx *ctx, size_t idx, cJSON *root) {
+  remfs_file *file = &kv_A(ctx->fv, idx);
+
+  if (file->parent[0] == '\0') {
+    cJSON *p = cJSON_CreateString(file->uuid);
+    cJSON_AddItemToArray(root, p);
+  } else {
+    cJSON *n = NULL;
+    uuid_map_node *ref = remfs_uuid_search(ctx, file->parent);
+    if (!ref)
+      return;
+    n = ref->members;
+    cJSON *p = cJSON_CreateString(file->uuid);
+    if (!n) {
+      n = cJSON_CreateArray();
+      ref->members = n;
+    }
+    cJSON_AddItemToArray(n, p);
+  }
+}
+
+remfs_ctx *remfs_init(const char *src_dir) {
+  remfs_ctx *ctx = calloc(1, sizeof(remfs_ctx));
+  ctx->src_dir = strdup(src_dir);
+  struct stat stbuf;
+  kstr tmp = {0, 0, 0};
+
+  remfs_list(ctx->src_dir, &ctx->fv);
+  ctx->fwd_map = calloc(1, sizeof(uuid_fwd_map));
+  ctx->rev_map = calloc(1, sizeof(uuid_rev_map));
+
+  RB_INIT(ctx->fwd_map);
+  RB_INIT(ctx->rev_map);
+
+  ctx->members = cJSON_CreateArray();
+  for (int i = 0; i < kv_size(ctx->fv); i++) {
+    remfs_file *file = &kv_A(ctx->fv, i);
+    if (file->deleted)
+      continue;
+    tmp.n = 0;
+    if (file->filetype == PAGE) {
+      kstr_cat(&tmp, "%s/%s/%s.rm", ctx->src_dir, file->parent, file->uuid);
+    } else {
+      kstr_cat(&tmp, "%s/%s.metadata", ctx->src_dir, file->uuid);
+    }
+    if (stat(tmp.a, &stbuf) == -1)
+      continue;
+    uuid_map_node *s = calloc(1, sizeof(uuid_map_node));
+    s->file = file;
+    RB_INSERT(uuid_fwd_map, ctx->fwd_map, s);
+  }
+
+  for (int i = 0; i < kv_size(ctx->fv); i++) {
+    remfs_file *file = &kv_A(ctx->fv, i);
+    uuid_map_node *s = remfs_uuid_search(ctx, file->uuid);
+    if (s == NULL)
+      continue;
+    s->path = gen_path(ctx, i);
+    RB_INSERT(uuid_rev_map, ctx->rev_map, s);
+    add_member(ctx, i, ctx->members);
+  }
+  kv_destroy(tmp);
+  return ctx;
+}
+
+void remfs_print(remfs_ctx *ctx, FILE *stream) {
+  uuid_map_node *n;
+  RB_FOREACH(n, uuid_rev_map, ctx->rev_map)
+  fprintf(stream, "%s->%s\n", n->path, n->file->uuid);
+  fflush(stream);
+}
 
 static uint8_t *slurp(const char *path) {
   uint8_t *ret = NULL;
