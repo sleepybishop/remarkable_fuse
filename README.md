@@ -43,3 +43,4 @@ It's also helpful for running external tools like handwriting recognition on you
  - Pattern fill for pens (eg. pencils, brush, marker)
  - Fix template background support (currently disabled)
  - SVG Polyline to `.rm` write support
+ - `*.highlights.json` annotation support

@@ -169,11 +169,8 @@ void remfmt_render_svg(FILE *stream, remfmt_stroke_vec *strokes,
     float seg_alpha = st.opacity;
     const char fmt[] = "%.3f %.3f ";
 
-    if (st.pen == HIGHLIGHTER_V2)
-      seg_color = svg_color[st.color];
-
-    if (prm && prm->annotation)
-      seg_color = svg_color[prm->note_color];
+    if (prm && prm->annotation && (st.pen == HIGHLIGHTER_V2 || st.pen == HIGHLIGHTER))
+      seg_color = svg_color[YELLOW];
 
     kstr pv = {0, 0, 0};
     for (int j = 0; j < kv_size(st.segments); j++) {

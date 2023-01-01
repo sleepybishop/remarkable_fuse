@@ -30,8 +30,6 @@ typedef struct {
   bool landscape;
   bool annotation;
   char *template_name;
-  remfmt_stroke_color hilite_color;
-  remfmt_stroke_color note_color;
 } remfmt_render_params;
 
 typedef struct {
