@@ -193,9 +193,7 @@ static int generate_fake_svg(uuid_map_node *ref, const char *rmpath,
   if (ref->sh && strokes) {
     remfmt_render_params prm = {.landscape = ref->file->landscape,
                                 .template_name = ref->file->template_name,
-                                .annotation = anot,
-                                .hilite_color = YELLOW,
-                                .note_color = BLUE};
+                                .annotation = anot};
     remfmt_render_svg(ref->sh, strokes, &prm);
   }
   remfmt_stroke_cleanup(strokes);
