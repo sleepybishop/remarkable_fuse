@@ -17,13 +17,13 @@ typedef enum {
   BLACK = 0,
   GRAY = 1,
   WHITE = 2,
-  RED,
-  ORANGE,
   YELLOW,
+  PINK,
   GREEN,
-  VIOLET,
   BLUE,
-  LIGHTBLUE
+  RED,
+  GRAYHL,
+  UNUSED
 } remfmt_stroke_color;
 
 typedef struct {

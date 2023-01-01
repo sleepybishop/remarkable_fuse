@@ -3,9 +3,9 @@
 
 static const char rmv5_magic[] = "reMarkable .lines file, version=%d          ";
 
-static uint32_t svg_color[] = {0x000000, 0x7d7d7d, 0xffffff, 0x880000,
-                               0x884400, 0xebcb8b, 0x006600, 0x7d007d,
-                               0x000088, 0x0000aa};
+static uint32_t svg_color[] = {0x000000, 0x7d7d7d, 0xffffff, 0xebcb8b,
+                               0xfe93bf, 0xa2f567, 0x000088, 0x880000,
+                               0x0d0d0d, 0x0000aa};
 
 static const char *svg_tpl[] = {
     "<svg xmlns=\"http://www.w3.org/2000/svg\" height=\"%d\" width=\"%d\">\n"
@@ -65,8 +65,8 @@ static void set_pen_attr(remfmt_stroke *st) {
     st->calc_width = 0.4 * pow(st->calc_width, 4);
     break;
   case HIGHLIGHTER:
-  case HIGHLIGHTER_V2:
     st->color = YELLOW;
+  case HIGHLIGHTER_V2:
     st->opacity = 0.25;
     st->square_cap = true;
     break;
@@ -169,11 +169,11 @@ void remfmt_render_svg(FILE *stream, remfmt_stroke_vec *strokes,
     float seg_alpha = st.opacity;
     const char fmt[] = "%.3f %.3f ";
 
-    if (prm && prm->annotation) {
+    if (st.pen == HIGHLIGHTER_V2)
+      seg_color = svg_color[st.color];
+
+    if (prm && prm->annotation)
       seg_color = svg_color[prm->note_color];
-      if (st.pen == HIGHLIGHTER || st.pen == HIGHLIGHTER_V2)
-        seg_color = svg_color[YELLOW];
-    }
 
     kstr pv = {0, 0, 0};
     for (int j = 0; j < kv_size(st.segments); j++) {
