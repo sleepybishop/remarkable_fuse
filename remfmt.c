@@ -1,11 +1,11 @@
 #include "remfmt.h"
 #include "struct.h"
 
-static const char rmv5_magic[] = "reMarkable .lines file, version=%d          ";
+static const char rmv_magic[] = "reMarkable .lines file, version=%d          ";
 
 static uint32_t svg_color[] = {0x000000, 0x7d7d7d, 0xffffff, 0xebcb8b,
                                0xfe93bf, 0xa2f567, 0x000088, 0x880000,
-                               0x0d0d0d, 0x0000aa};
+                               0x0d0d0d};
 
 static const char *svg_tpl[] = {
     "<svg xmlns=\"http://www.w3.org/2000/svg\" height=\"%d\" width=\"%d\">\n"
@@ -65,7 +65,7 @@ static void set_pen_attr(remfmt_stroke *st) {
     st->calc_width = 0.4 * pow(st->calc_width, 4);
     break;
   case HIGHLIGHTER:
-    st->color = YELLOW;
+    st->color = YELLOWHL;
   case HIGHLIGHTER_V2:
     st->opacity = 0.25;
     st->square_cap = true;
@@ -111,9 +111,9 @@ static float get_seg_alpha(remfmt_stroke *st, remfmt_seg *sg) {
   return clampf(alpha, 0.0, 1.0);
 }
 
-void remfmt_render_rm5(FILE *stream, remfmt_stroke_vec *strokes) {
+void remfmt_render_rm(FILE *stream, remfmt_stroke_vec *strokes) {
   char buf[64] = {0};
-  snprintf(buf, 44, rmv5_magic, 5);
+  snprintf(buf, 44, rmv_magic, 5);
   fwrite(buf, 1, 43, stream);
 
   int num_layers = kv_A(*strokes, strokes->n - 1).layer + 1;
@@ -169,8 +169,8 @@ void remfmt_render_svg(FILE *stream, remfmt_stroke_vec *strokes,
     float seg_alpha = st.opacity;
     const char fmt[] = "%.3f %.3f ";
 
-    if (prm && prm->annotation && (st.pen == HIGHLIGHTER_V2 || st.pen == HIGHLIGHTER))
-      seg_color = svg_color[YELLOW];
+    if (prm && prm->annotation && (st.pen == HIGHLIGHTER_V2))
+      seg_color = svg_color[st.color];
 
     kstr pv = {0, 0, 0};
     for (int j = 0; j < kv_size(st.segments); j++) {
@@ -213,8 +213,12 @@ void remfmt_stroke_cleanup(remfmt_stroke_vec *strokes) {
 remfmt_stroke_vec *remfmt_parse(FILE *stream) {
   char buf[64] = {0};
   int got, version = 0, num_layers = 0;
-  if (fscanf(stream, rmv5_magic, &version) == 0)
+  if (fscanf(stream, rmv_magic, &version) == 0)
     return NULL;
+  if (version == 6) {
+    // defer to crdt parser 
+	return NULL;
+  }
   if (version != 3 && version != 5)
     return NULL;
 
@@ -238,6 +242,7 @@ remfmt_stroke_vec *remfmt_parse(FILE *stream) {
     for (int i = 0; i < num_strokes; i++) {
       int num_segments = 0;
       remfmt_stroke st = {0};
+      st.version = version;
       switch (version) {
       case 3:
         got = fread(buf, 4, 5, stream);

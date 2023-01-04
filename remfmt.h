@@ -17,13 +17,12 @@ typedef enum {
   BLACK = 0,
   GRAY = 1,
   WHITE = 2,
-  YELLOW,
-  PINK,
-  GREEN,
+  YELLOWHL,
+  PINKHL,
+  GREENHL,
   BLUE,
   RED,
   GRAYHL,
-  UNUSED
 } remfmt_stroke_color;
 
 typedef struct {
@@ -41,7 +40,15 @@ typedef struct {
   float pressure;
 } remfmt_seg;
 
+typedef struct {
+  float height;
+  float width;
+  float x;
+  float y;
+} remfmt_hilite;
+
 typedef kvec_t(remfmt_seg) remfmt_seg_vec;
+typedef kvec_t(remfmt_hilite) remfmt_hilite_vec;
 
 typedef struct {
   unsigned layer;
@@ -56,11 +63,12 @@ typedef struct {
   bool square_cap;
 
   remfmt_seg_vec segments;
+  int version;
 } remfmt_stroke;
 
 typedef kvec_t(remfmt_stroke) remfmt_stroke_vec;
 
-void remfmt_render_rm5(FILE *stream, remfmt_stroke_vec *strokes);
+void remfmt_render_rm(FILE *stream, remfmt_stroke_vec *strokes);
 void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
                        remfmt_render_params *prm);
 void remfmt_render_svg(FILE *stream, remfmt_stroke_vec *strokes,
