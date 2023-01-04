@@ -7,7 +7,7 @@
 
 int main(int argc, char *argv[]) {
   if (argc < 3) {
-    fprintf(stderr, "usage: %s <input.rm> (svg|rm5)\n", argv[0]);
+    fprintf(stderr, "usage: %s <input.rm> (svg|rm)\n", argv[0]);
     exit(1);
   }
 
@@ -24,7 +24,7 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[2], "png") == 0) {
       remfmt_render_png(out, strokes, NULL);
     } else {
-      remfmt_render_rm5(out, strokes);
+      remfmt_render_rm(out, strokes);
     }
   }
 
