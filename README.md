@@ -1,3 +1,8 @@
+
+## UNMANTAINED - missing support for v6+ format ##
+
+Adding support for v6 lines format was a larger effort than I had anticipated and have not had the chance to finish it.
+
 # remarkable_fuse
 
 A fuse filesystem for remarkable tablets using version 2.x of their software (`xochitl`).
