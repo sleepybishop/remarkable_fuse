@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [ "master", "main", "revive" ]
+  pull_request:
+    branches: [ "master", "main", "revive" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc make libfuse-dev perl
+
+    - name: Build and run tests
+      run: make check

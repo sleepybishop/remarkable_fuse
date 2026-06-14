@@ -2,7 +2,9 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <fuse.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,72 +14,291 @@
 #include <unistd.h>
 
 #include "cJSON.h"
-#include "kstr.h"
+#include "deps/sds/sds.h"
 #include "remfmt.h"
 #include "remfs.h"
 
 #define IS_SVG (1 << 0)
 #define IS_ANNOT_DIR (1 << 1)
 #define IS_ANNOT_PAGE (1 << 2)
+#define IS_PNG (1 << 3)
+#define IS_PDF (1 << 4)
 
 #define DEFAULT_SOURCE "./xochitl"
+#define CACHE_SIZE 128
+
+typedef struct cache_entry {
+  char uuid[64];
+  char type[8];
+  time_t mtime;
+  uint8_t *data;
+  size_t size;
+  int refcount;
+  struct cache_entry *prev;
+  struct cache_entry *next;
+} cache_entry;
+
+static cache_entry *cache_head = NULL;
+static cache_entry *cache_tail = NULL;
+static int cache_count = 0;
+static pthread_mutex_t cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static cache_entry *get_cached_entry(const char *uuid, const char *type,
+                                     time_t mtime) {
+  pthread_mutex_lock(&cache_mutex);
+  cache_entry *curr = cache_head;
+  while (curr) {
+    if (strcmp(curr->uuid, uuid) == 0 && strcmp(curr->type, type) == 0) {
+      if (curr->mtime == mtime) {
+        if (curr != cache_head) {
+          curr->prev->next = curr->next;
+          if (curr->next)
+            curr->next->prev = curr->prev;
+          else
+            cache_tail = curr->prev;
+          curr->next = cache_head;
+          curr->prev = NULL;
+          cache_head->prev = curr;
+          cache_head = curr;
+        }
+        curr->refcount++;
+        pthread_mutex_unlock(&cache_mutex);
+        return curr;
+      }
+      if (curr->prev)
+        curr->prev->next = curr->next;
+      else
+        cache_head = curr->next;
+      if (curr->next)
+        curr->next->prev = curr->prev;
+      else
+        cache_tail = curr->prev;
+      if (curr->refcount == 0) {
+        free(curr->data);
+        free(curr);
+      } else {
+        curr->uuid[0] = '\0';
+      }
+      cache_count--;
+      break;
+    }
+    curr = curr->next;
+  }
+  pthread_mutex_unlock(&cache_mutex);
+  return NULL;
+}
+
+static cache_entry *add_to_cache(const char *uuid, const char *type,
+                                 time_t mtime, uint8_t *data, size_t size) {
+  cache_entry *entry = calloc(1, sizeof(cache_entry));
+  strcpy(entry->uuid, uuid);
+  strcpy(entry->type, type);
+  entry->mtime = mtime;
+  entry->data = data;
+  entry->size = size;
+  entry->refcount = 1;
+
+  pthread_mutex_lock(&cache_mutex);
+  entry->next = cache_head;
+  if (cache_head)
+    cache_head->prev = entry;
+  cache_head = entry;
+  if (!cache_tail)
+    cache_tail = entry;
+  cache_count++;
+
+  while (cache_count > CACHE_SIZE) {
+    cache_entry *tail = cache_tail;
+    cache_tail = tail->prev;
+    if (cache_tail)
+      cache_tail->next = NULL;
+    else
+      cache_head = NULL;
+
+    if (tail->refcount == 0) {
+      free(tail->data);
+      free(tail);
+    } else {
+      tail->uuid[0] = '\0';
+    }
+    cache_count--;
+  }
+  pthread_mutex_unlock(&cache_mutex);
+  return entry;
+}
+
+static void release_cached_entry(cache_entry *entry) {
+  pthread_mutex_lock(&cache_mutex);
+  entry->refcount--;
+  if (entry->refcount == 0 && entry->uuid[0] == '\0') {
+    free(entry->data);
+    free(entry);
+  }
+  pthread_mutex_unlock(&cache_mutex);
+}
+
+static bool enable_svg = true;
+static bool enable_png = true;
+static bool enable_pdf = true;
 
 static struct options {
   const char *src_dir;
+  const char *config_file;
   int show_help;
 } options;
 
-#define OPTION(t, p)                                                           \
-  { t, offsetof(struct options, p), 1 }
+#define OPTION(t, p) {t, offsetof(struct options, p), 1}
 static const struct fuse_opt option_spec[] = {
-    OPTION("--source=%s", src_dir), OPTION("-h", show_help),
-    OPTION("--help", show_help), FUSE_OPT_END};
+    OPTION("--source=%s", src_dir), OPTION("--config=%s", config_file),
+    OPTION("-h", show_help), OPTION("--help", show_help), FUSE_OPT_END};
 
-static kstr munge_path(const char *path, int *flags) {
-  kstr ret = {0, 0, 0};
-  kstr_cat(&ret, "%s", (char *)path);
-  char *svg_ext = strstr(ret.a, ".svg");
-  if (svg_ext) {
-    sprintf(svg_ext, "%s", ".rm");
-  }
-  char *annot_ext = strstr(ret.a, " Annotations");
-  if (annot_ext) {
-    if (annot_ext[12] == '\0') {
-      annot_ext[0] = '\0';
-    } else {
-      memmove(annot_ext, annot_ext + 12, strlen(annot_ext + 12) + 1);
+static void load_config(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (!f) {
+    if (options.config_file) {
+      fprintf(stderr, "warning: could not open config file %s\n", path);
     }
+    return;
   }
+
+  fseek(f, 0, SEEK_END);
+  long size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (size <= 0) {
+    fclose(f);
+    return;
+  }
+
+  char *buf = malloc(size + 1);
+  if (!buf) {
+    fclose(f);
+    return;
+  }
+
+  size_t read_bytes = fread(buf, 1, size, f);
+  buf[read_bytes] = '\0';
+  fclose(f);
+
+  cJSON *json = cJSON_Parse(buf);
+  free(buf);
+
+  if (!json) {
+    fprintf(stderr, "error parsing config file %s\n", path);
+    return;
+  }
+
+  cJSON *renderers = cJSON_GetObjectItem(json, "renderers");
+  if (cJSON_IsArray(renderers)) {
+    enable_svg = false;
+    enable_png = false;
+    enable_pdf = false;
+    cJSON *item = NULL;
+    cJSON_ArrayForEach(item, renderers) {
+      if (cJSON_IsString(item)) {
+        const char *val = cJSON_GetStringValue(item);
+        if (strcmp(val, "svg") == 0)
+          enable_svg = true;
+        else if (strcmp(val, "png") == 0)
+          enable_png = true;
+        else if (strcmp(val, "pdf") == 0)
+          enable_pdf = true;
+      }
+    }
+  } else {
+    cJSON *svg_item = cJSON_GetObjectItem(json, "svg");
+    if (cJSON_IsBool(svg_item))
+      enable_svg = cJSON_IsTrue(svg_item);
+
+    cJSON *png_item = cJSON_GetObjectItem(json, "png");
+    if (cJSON_IsBool(png_item))
+      enable_png = cJSON_IsTrue(png_item);
+
+    cJSON *pdf_item = cJSON_GetObjectItem(json, "pdf");
+    if (cJSON_IsBool(pdf_item))
+      enable_pdf = cJSON_IsTrue(pdf_item);
+  }
+
+  cJSON_Delete(json);
+}
+
+static sds munge_path(const char *path, int *flags) {
+  sds ret = sdsnew(path);
+
+  size_t len = sdslen(ret);
+  bool is_svg = false;
+  bool is_png = false;
+  bool is_pdf = false;
+  if (len >= 4 && strcmp(ret + len - 4, ".svg") == 0) {
+    ret[len - 4] = '\0';
+    is_svg = true;
+  } else if (len >= 4 && strcmp(ret + len - 4, ".png") == 0) {
+    ret[len - 4] = '\0';
+    is_png = true;
+  } else if (len >= 4 && strcmp(ret + len - 4, ".pdf") == 0) {
+    ret[len - 4] = '\0';
+    is_pdf = true;
+  }
+
+  char *annot_ext = strstr(ret, " Annotations");
+  bool is_annot_dir = false;
+  bool is_annot_page = false;
+  while (annot_ext) {
+    if (annot_ext[12] == '\0' || annot_ext[12] == '/') {
+      is_annot_page = true;
+      if (annot_ext[12] == '\0') {
+        is_annot_dir = true;
+        annot_ext[0] = '\0';
+      } else {
+        memmove(annot_ext, annot_ext + 12, strlen(annot_ext + 12) + 1);
+      }
+      break;
+    }
+    annot_ext = strstr(annot_ext + 1, " Annotations");
+  }
+
+  sdsupdatelen(ret);
 
   if (flags) {
-    *flags |= (svg_ext) ? IS_SVG : 0;
-    *flags |= (annot_ext && annot_ext[12] == '\0') ? IS_ANNOT_DIR : 0;
-    *flags |= (annot_ext) ? IS_ANNOT_PAGE : 0;
+    *flags |= is_svg ? IS_SVG : 0;
+    *flags |= is_png ? IS_PNG : 0;
+    *flags |= is_pdf ? IS_PDF : 0;
+    *flags |= is_annot_dir ? IS_ANNOT_DIR : 0;
+    *flags |= is_annot_page ? IS_ANNOT_PAGE : 0;
   }
   return ret;
 }
 
 static uuid_map_node *rewrite_path(remfs_ctx *ctx, const char *path, int *flags,
-                                   kstr *newpath) {
-  kstr munged = munge_path(path, flags);
-  uuid_map_node *ref = remfs_path_search(ctx, munged.a);
+                                   sds *newpath) {
+  sds munged = munge_path(path, flags);
+  uuid_map_node *ref = remfs_path_search(ctx, munged);
+  if (!ref && (*flags & (IS_SVG | IS_PNG | IS_PDF))) {
+    ref = remfs_path_search(ctx, path);
+    if (ref) {
+      *flags &= ~(IS_SVG | IS_PNG | IS_PDF);
+    }
+  }
+  if (ref && ref->file->filetype != PAGE) {
+    *flags &= ~(IS_SVG | IS_PNG | IS_PDF);
+  }
   if (ref && newpath) {
     if (ref->file->type == COLLECTION) {
-      kstr_cat(newpath, "%s", ctx->src_dir);
+      *newpath = sdscatprintf(*newpath, "%s", ctx->src_dir);
     } else {
       const char *exts[] = {"", "", ".epub", ".pdf", ".rm"};
-      kstr_cat(newpath, "%s/", ctx->src_dir);
+      *newpath = sdscatprintf(*newpath, "%s/", ctx->src_dir);
       if (ref->file->filetype == PAGE) {
-        kstr_cat(newpath, "%s/", ref->file->parent);
+        *newpath = sdscatprintf(*newpath, "%s/", ref->file->parent);
       }
       if (*flags & IS_ANNOT_DIR) {
-        kstr_cat(newpath, "%s", ref->file->uuid);
+        *newpath = sdscatprintf(*newpath, "%s", ref->file->uuid);
       } else {
-        kstr_cat(newpath, "%s%s", ref->file->uuid, exts[ref->file->filetype]);
+        *newpath = sdscatprintf(*newpath, "%s%s", ref->file->uuid,
+                                exts[ref->file->filetype]);
       }
     }
   }
-  kv_destroy(munged);
+  sdsfree(munged);
   return ref;
 }
 
@@ -90,62 +311,88 @@ static int remfuse_getattr(const char *path, struct stat *stbuf) {
     ret = stat(ctx->src_dir, stbuf);
   } else {
     int flags = 0;
-    kstr newpath = {0, 0, 0};
+    sds newpath = sdsempty();
     uuid_map_node *ref = rewrite_path(ctx, path, &flags, &newpath);
-    if (newpath.a) {
+    if (sdslen(newpath) > 0) {
       if (ref) {
-        if ((flags & IS_SVG)) {
-          if (ref->sh) {
-            ret = fstat(fileno(ref->sh), stbuf);
-          } else {
-            ret = stat(newpath.a, stbuf);
-            // hack for empty pages
-            if (ret == 0)
-              stbuf->st_size = 2 * 1024 * 1024;
+        bool allowed = false;
+        if ((flags & IS_SVG) && enable_svg)
+          allowed = true;
+        if ((flags & IS_PNG) && enable_png)
+          allowed = true;
+        if ((flags & IS_PDF) && enable_pdf)
+          allowed = true;
+
+        if ((flags & (IS_SVG | IS_PNG | IS_PDF)) && allowed) {
+          ret = stat(newpath, stbuf);
+          if (ret == 0) {
+            const char *type_str =
+                (flags & IS_SVG) ? "svg" : ((flags & IS_PDF) ? "pdf" : "png");
+            cache_entry *cached =
+                get_cached_entry(ref->file->uuid, type_str, stbuf->st_mtime);
+            if (cached) {
+              stbuf->st_size = cached->size;
+              release_cached_entry(cached);
+            } else {
+              stbuf->st_size = 5 * 1024 * 1024;
+            }
           }
+        } else if ((flags & (IS_SVG | IS_PNG | IS_PDF)) && !allowed) {
+          ret = -ENOENT;
         } else {
-          ret = stat(newpath.a, stbuf);
+          ret = stat(newpath, stbuf);
         }
       }
-      kv_destroy(newpath);
     }
+    sdsfree(newpath);
   }
-  // force read only
   if (ret == 0) {
     stbuf->st_mode &= ~0200;
     stbuf->st_mode |= 0400;
   }
-  // if (ret == -ENOENT) fprintf(stderr, "getattr failed: %s\n", path);
   return ret;
 }
 
-static cJSON *get_dir_entries(remfs_ctx *ctx, const char *path) {
-  cJSON *n = NULL;
-  if (strcmp(path, "/") == 0) {
-    n = ctx->members;
-  } else {
-    int flags = 0;
-    uuid_map_node *ref = rewrite_path(ctx, path, &flags, NULL);
-    if (ref)
-      n = ref->members;
-  }
-  return n;
-}
-
-static void fill_fake_svg(void *buf, fuse_fill_dir_t filler, remfs_file *file) {
-  kstr tmp = {0, 0, 0};
-  kstr_cat(&tmp, "%sXXXX", file->visible_name);
-  sprintf(strstr(tmp.a, ".rm"), ".svg");
-  filler(buf, tmp.a, NULL, 0);
-  kv_destroy(tmp);
+static void fill_fake_ext(void *buf, fuse_fill_dir_t filler, remfs_file *file,
+                          const char *ext_str) {
+  sds tmp = sdsnew(file->visible_name);
+  tmp = sdscat(tmp, ext_str);
+  filler(buf, tmp, NULL, 0);
+  sdsfree(tmp);
 }
 
 static void fill_fake_folder(void *buf, fuse_fill_dir_t filler,
                              remfs_file *file) {
-  kstr tmp = {0, 0, 0};
-  kstr_cat(&tmp, "%s Annotations", file->visible_name);
-  filler(buf, tmp.a, NULL, 0);
-  kv_destroy(tmp);
+  sds tmp = sdsempty();
+  tmp = sdscatprintf(tmp, "%s Annotations", file->visible_name);
+  filler(buf, tmp, NULL, 0);
+  sdsfree(tmp);
+}
+
+static bool has_annotations(const char *src_dir, remfs_file *file) {
+  sds rmpath = sdscatprintf(sdsempty(), "%s/%s/%s.rm", src_dir, file->parent,
+                            file->uuid);
+  struct stat st;
+  if (stat(rmpath, &st) == -1) {
+    sdsfree(rmpath);
+    return false;
+  }
+  if (st.st_size <= 43) {
+    sdsfree(rmpath);
+    return false;
+  }
+
+  bool has_strokes = false;
+  remfmt_stroke_vec *strokes = remfmt_parse(rmpath);
+  if (strokes) {
+    if (kv_size(*strokes) > 0) {
+      has_strokes = true;
+    }
+    remfmt_stroke_cleanup(strokes);
+  }
+
+  sdsfree(rmpath);
+  return has_strokes;
 }
 
 static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
@@ -153,85 +400,150 @@ static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
   struct fuse_context *fuse_ctx = fuse_get_context();
   remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
 
-  cJSON *n = get_dir_entries(ctx, path);
+  children_vec *n = NULL;
+  int flags = 0;
+  if (strcmp(path, "/") == 0) {
+    n = &ctx->root_children;
+  } else {
+    uuid_map_node *ref = rewrite_path(ctx, path, &flags, NULL);
+    if (ref)
+      n = &ref->children;
+  }
+
   if (!n)
     return -ENOENT;
 
   filler(buf, ".", NULL, 0);
   filler(buf, "..", NULL, 0);
 
-  cJSON *p = NULL;
-  cJSON_ArrayForEach(p, n) {
-    char *uuid = cJSON_GetStringValue(p);
-    uuid_map_node *s = remfs_uuid_search(ctx, uuid);
+  for (size_t i = 0; i < kv_size(*n); i++) {
+    uuid_map_node *s = kv_A(*n, i);
     if (!s)
       continue;
     if (s->file->filetype == PAGE) {
-      fill_fake_svg(buf, filler, s->file);
-    }
-    if (s->file->filetype == PDF || s->file->filetype == EPUB) {
+      if (flags & IS_ANNOT_DIR) {
+        if (!has_annotations(ctx->src_dir, s->file)) {
+          continue;
+        }
+      }
+      if (enable_svg)
+        fill_fake_ext(buf, filler, s->file, ".svg");
+      if (enable_png)
+        fill_fake_ext(buf, filler, s->file, ".png");
+      if (enable_pdf)
+        fill_fake_ext(buf, filler, s->file, ".pdf");
+    } else if (s->file->filetype == PDF || s->file->filetype == EPUB) {
       fill_fake_folder(buf, filler, s->file);
+      filler(buf, s->file->visible_name, NULL, 0);
+    } else {
+      filler(buf, s->file->visible_name, NULL, 0);
     }
-    filler(buf, s->file->visible_name, NULL, 0);
   }
   return 0;
 }
 
-static int generate_fake_svg(uuid_map_node *ref, const char *rmpath,
-                             bool anot) {
-  char svgp[] = "/tmp/remfuse_svg_XXXXXX";
-  int fd = mkstemp(svgp);
-  FILE *in = NULL;
+static cache_entry *generate_fake_ext(uuid_map_node *ref, const char *rmpath,
+                                      bool anot, const char *ext) {
+  struct stat st;
+  if (stat(rmpath, &st) == -1)
+    return NULL;
 
-  if (fd == -1)
-    return -1;
-  in = fopen(rmpath, "rb");
-  if (!in)
-    return -1;
-  ref->sh = fdopen(fd, "wb");
-  remfmt_stroke_vec *strokes = remfmt_parse(in);
-  if (ref->sh && strokes) {
+  cache_entry *cached = get_cached_entry(ref->file->uuid, ext, st.st_mtime);
+  if (cached)
+    return cached;
+
+  uint8_t *data = NULL;
+  size_t size = 0;
+  FILE *sh = open_memstream((char **)&data, &size);
+  if (!sh)
+    return NULL;
+
+  remfmt_stroke_vec *strokes = remfmt_parse(rmpath);
+  if (strokes) {
     remfmt_render_params prm = {.landscape = ref->file->landscape,
                                 .template_name = ref->file->template_name,
                                 .annotation = anot};
-    remfmt_render_svg(ref->sh, strokes, &prm);
+    if (strcmp(ext, "svg") == 0) {
+      remfmt_render_svg(sh, strokes, &prm);
+    } else if (strcmp(ext, "pdf") == 0) {
+      remfmt_render_pdf(sh, strokes, &prm);
+    } else {
+      remfmt_render_png(sh, strokes, &prm);
+    }
+    remfmt_stroke_cleanup(strokes);
   }
-  remfmt_stroke_cleanup(strokes);
-  fclose(in);
-  fflush(ref->sh);
-  return fd;
+  fclose(sh);
+
+  return add_to_cache(ref->file->uuid, ext, st.st_mtime, data, size);
 }
+
+#define CACHE_PTR_FLAG (1ULL << 63)
+#define MAKE_CACHE_PTR(ptr) ((uint64_t)(uintptr_t)(ptr) | CACHE_PTR_FLAG)
+#define GET_CACHE_PTR(fh) ((cache_entry *)(uintptr_t)((fh) & ~CACHE_PTR_FLAG))
+#define IS_CACHE_PTR(fh) (((fh) & CACHE_PTR_FLAG) != 0)
 
 static int remfuse_open(const char *path, struct fuse_file_info *fi) {
   struct fuse_context *fuse_ctx = fuse_get_context();
   remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
-  int fd = -1, flags = 0;
-  kstr newpath = {0, 0, 0};
+  int flags = 0;
+  sds newpath = sdsempty();
   uuid_map_node *ref = rewrite_path(ctx, path, &flags, &newpath);
-  if (ref && (flags & IS_SVG)) {
-    fd = generate_fake_svg(ref, newpath.a, flags & IS_ANNOT_PAGE);
-  } else {
-    if (!newpath.a)
-      return -1;
-    fd = open(newpath.a, fi->flags);
+
+  if (flags & (IS_SVG | IS_PNG | IS_PDF)) {
+    bool allowed = false;
+    if ((flags & IS_SVG) && enable_svg)
+      allowed = true;
+    if ((flags & IS_PNG) && enable_png)
+      allowed = true;
+    if ((flags & IS_PDF) && enable_pdf)
+      allowed = true;
+    if (!allowed) {
+      sdsfree(newpath);
+      return -ENOENT;
+    }
   }
-  kv_destroy(newpath);
 
-  if (fd == -1)
-    return -errno;
-
-  fi->fh = fd;
-  return 0;
+  if (ref && (flags & IS_SVG) && enable_svg) {
+    cache_entry *entry =
+        generate_fake_ext(ref, newpath, flags & IS_ANNOT_PAGE, "svg");
+    sdsfree(newpath);
+    if (!entry)
+      return -ENOENT;
+    fi->fh = MAKE_CACHE_PTR(entry);
+    return 0;
+  } else if (ref && (flags & IS_PDF) && enable_pdf) {
+    cache_entry *entry =
+        generate_fake_ext(ref, newpath, flags & IS_ANNOT_PAGE, "pdf");
+    sdsfree(newpath);
+    if (!entry)
+      return -ENOENT;
+    fi->fh = MAKE_CACHE_PTR(entry);
+    return 0;
+  } else if (ref && (flags & IS_PNG) && enable_png) {
+    cache_entry *entry =
+        generate_fake_ext(ref, newpath, flags & IS_ANNOT_PAGE, "png");
+    sdsfree(newpath);
+    if (!entry)
+      return -ENOENT;
+    fi->fh = MAKE_CACHE_PTR(entry);
+    return 0;
+  } else {
+    if (sdslen(newpath) == 0) {
+      sdsfree(newpath);
+      return -1;
+    }
+    int fd = open(newpath, fi->flags);
+    sdsfree(newpath);
+    if (fd == -1)
+      return -errno;
+    fi->fh = fd;
+    return 0;
+  }
 }
 
 static int remfuse_release(const char *path, struct fuse_file_info *fi) {
-  struct fuse_context *fuse_ctx = fuse_get_context();
-  remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
-  int flags = 0;
-  uuid_map_node *ref = rewrite_path(ctx, path, &flags, NULL);
-  if (ref->sh) {
-    fclose(ref->sh);
-    ref->sh = NULL;
+  if (IS_CACHE_PTR(fi->fh)) {
+    release_cached_entry(GET_CACHE_PTR(fi->fh));
   } else {
     close(fi->fh);
   }
@@ -240,11 +552,20 @@ static int remfuse_release(const char *path, struct fuse_file_info *fi) {
 
 static int remfuse_read(const char *path, char *buf, size_t size, off_t offset,
                         struct fuse_file_info *fi) {
-  int ret;
-  ret = pread(fi->fh, buf, size, offset);
-  if (ret == -1)
-    ret = -errno;
-  return ret;
+  if (IS_CACHE_PTR(fi->fh)) {
+    cache_entry *entry = GET_CACHE_PTR(fi->fh);
+    if (offset >= entry->size)
+      return 0;
+    if (offset + size > entry->size)
+      size = entry->size - offset;
+    memcpy(buf, entry->data + offset, size);
+    return size;
+  } else {
+    int ret = pread(fi->fh, buf, size, offset);
+    if (ret == -1)
+      return -errno;
+    return ret;
+  }
 }
 
 static void *remfuse_init(struct fuse_conn_info *conn) {
@@ -273,6 +594,7 @@ static void usage(const char *progname) {
   printf("File-system specific options:\n"
          "    --source=<s>        location of data dir\n"
          "                        (default: \"%s\")\n"
+         "    --config=<c>        path to config JSON file\n"
          "\n",
          DEFAULT_SOURCE);
 }
@@ -283,9 +605,19 @@ int main(int argc, char *argv[]) {
   struct stat stbuf;
 
   options.src_dir = DEFAULT_SOURCE;
+  options.config_file = NULL;
 
   if (fuse_opt_parse(&args, &options, option_spec, NULL) == -1)
     goto cleanup;
+
+  if (options.config_file) {
+    load_config(options.config_file);
+  } else {
+    struct stat st;
+    if (stat("config.json", &st) == 0) {
+      load_config("config.json");
+    }
+  }
 
   if (options.show_help) {
     usage(argv[0]);

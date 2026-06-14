@@ -5,8 +5,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "kstr.h"
+#include "deps/sds/sds.h"
 #include "tree.h"
+#include <kvec.h>
 
 #define RM_PATH_MAX 256
 
@@ -37,11 +38,13 @@ typedef struct {
 
 typedef kvec_t(remfs_file) remfs_file_vec;
 
+struct uuid_map_node;
+typedef kvec_t(struct uuid_map_node *) children_vec;
+
 typedef struct uuid_map_node {
   remfs_file *file;
   char *path;
-  cJSON *members;
-  FILE *sh;
+  children_vec children;
   RB_ENTRY(uuid_map_node) fwdp;
   RB_ENTRY(uuid_map_node) revp;
 } uuid_map_node;
@@ -54,7 +57,7 @@ typedef struct {
   remfs_file_vec fv;
   uuid_fwd_map *fwd_map;
   uuid_rev_map *rev_map;
-  cJSON *members;
+  children_vec root_children;
 } remfs_ctx;
 
 int remfs_list(const char *path, remfs_file_vec *fv);

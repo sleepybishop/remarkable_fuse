@@ -3,9 +3,8 @@
 
 static const char rmv_magic[] = "reMarkable .lines file, version=%d          ";
 
-static uint32_t svg_color[] = {0x000000, 0x7d7d7d, 0xffffff, 0xebcb8b,
-                               0xfe93bf, 0xa2f567, 0x000088, 0x880000,
-                               0x0d0d0d};
+static uint32_t svg_color[] = {0x000000, 0x7d7d7d, 0xffffff, 0xebcb8b, 0xfe93bf,
+                               0xa2f567, 0x000088, 0x880000, 0x0d0d0d};
 
 static const char *svg_tpl[] = {
     "<svg xmlns=\"http://www.w3.org/2000/svg\" height=\"%d\" width=\"%d\">\n"
@@ -216,8 +215,8 @@ remfmt_stroke_vec *remfmt_parse(FILE *stream) {
   if (fscanf(stream, rmv_magic, &version) == 0)
     return NULL;
   if (version == 6) {
-    // defer to crdt parser 
-	return NULL;
+    // defer to crdt parser
+    return NULL;
   }
   if (version != 3 && version != 5)
     return NULL;

@@ -1,9 +1,5 @@
-
-## UNMANTAINED - missing support for v6+ format ##
-
-Adding support for v6 lines format was a larger effort than I had anticipated and have not had the chance to finish it.
-
 # remarkable_fuse
+[![CI](https://github.com/sleepybishop/remarkable_fuse/actions/workflows/ci.yml/badge.svg)](https://github.com/sleepybishop/remarkable_fuse/actions/workflows/ci.yml)
 
 A fuse filesystem for remarkable tablets using version 2.x of their software (`xochitl`).
 
@@ -40,12 +36,14 @@ It's also helpful for running external tools like handwriting recognition on you
   ```
 
 ### TODO
- - Integrate a config file
  - Delete support
  - PDF/EPUB write support 
- - `.rm` to PDF support
  - PDF/EPUB annotations overlay support
- - Pattern fill for pens (eg. pencils, brush, marker)
  - Fix template background support (currently disabled)
  - SVG Polyline to `.rm` write support
  - `*.highlights.json` annotation support
+ - Typed text input parsing and rendering (v6 scene graph)
+
+### Architecture & Performance TODOs
+ - Build a live-sync watcher (`inotify`/`kqueue`) to update the filesystem map without remounting
+ - [x] Decouple FUSE daemon dependencies completely from the `remfs` core library

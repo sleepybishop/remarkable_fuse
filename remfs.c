@@ -36,22 +36,22 @@ uuid_map_node *remfs_uuid_search(remfs_ctx *ctx, const char *uuid) {
 
 static void empty_maps(remfs_ctx *ctx) {
   uuid_map_node *n, *nxt;
-  for (n = RB_MIN(uuid_rev_map, ctx->rev_map); n != NULL; n = nxt) {
-    nxt = RB_NEXT(uuid_rev_map, ctx->rev_map, n);
-    RB_REMOVE(uuid_rev_map, ctx->rev_map, n);
-    cJSON_Delete(n->members);
-    free(n->path);
+  for (n = RB_MIN(uuid_fwd_map, ctx->fwd_map); n != NULL; n = nxt) {
+    nxt = RB_NEXT(uuid_fwd_map, ctx->fwd_map, n);
+    RB_REMOVE(uuid_fwd_map, ctx->fwd_map, n);
+    kv_destroy(n->children);
+    sdsfree(n->path);
     free(n);
   }
-  free(ctx->rev_map);
-  free(ctx->fwd_map);
 }
 
 void remfs_destroy(remfs_ctx *ctx) {
   if (ctx) {
     empty_maps(ctx);
-    cJSON_Delete(ctx->members);
+    free(ctx->fwd_map);
+    free(ctx->rev_map);
     kv_destroy(ctx->fv);
+    kv_destroy(ctx->root_children);
     free(ctx->src_dir);
     free(ctx);
   }
@@ -60,42 +60,34 @@ void remfs_destroy(remfs_ctx *ctx) {
 static char *gen_path(remfs_ctx *ctx, size_t idx) {
   remfs_file *file = &kv_A(ctx->fv, idx);
   kvec_t(char *) stk = {0, 0, 0};
-  kstr fp = {0, 0, 0};
+  sds fp = sdsempty();
 
   if (file->parent[0] == '\0') {
-    kstr_cat(&fp, "/%s", file->visible_name);
+    fp = sdscatprintf(fp, "/%s", file->visible_name);
   } else {
     kv_push(char *, stk, file->visible_name);
     uuid_map_node *ref = remfs_uuid_search(ctx, file->parent);
-    while (ref != NULL) {
+    int depth = 0;
+    while (ref != NULL && depth < 64) {
       kv_push(char *, stk, ref->file->visible_name);
       ref = remfs_uuid_search(ctx, ref->file->parent);
+      depth++;
     }
     while (kv_size(stk) > 0)
-      kstr_cat(&fp, "/%s", kv_pop(stk));
+      fp = sdscatprintf(fp, "/%s", kv_pop(stk));
   }
   kv_destroy(stk);
-  return fp.a;
+  return fp;
 }
 
-static void add_member(remfs_ctx *ctx, size_t idx, cJSON *root) {
-  remfs_file *file = &kv_A(ctx->fv, idx);
-
-  if (file->parent[0] == '\0') {
-    cJSON *p = cJSON_CreateString(file->uuid);
-    cJSON_AddItemToArray(root, p);
+static void add_member(remfs_ctx *ctx, uuid_map_node *s) {
+  if (s->file->parent[0] == '\0') {
+    kv_push(uuid_map_node *, ctx->root_children, s);
   } else {
-    cJSON *n = NULL;
-    uuid_map_node *ref = remfs_uuid_search(ctx, file->parent);
+    uuid_map_node *ref = remfs_uuid_search(ctx, s->file->parent);
     if (!ref)
       return;
-    n = ref->members;
-    cJSON *p = cJSON_CreateString(file->uuid);
-    if (!n) {
-      n = cJSON_CreateArray();
-      ref->members = n;
-    }
-    cJSON_AddItemToArray(n, p);
+    kv_push(uuid_map_node *, ref->children, s);
   }
 }
 
@@ -103,7 +95,7 @@ remfs_ctx *remfs_init(const char *src_dir) {
   remfs_ctx *ctx = calloc(1, sizeof(remfs_ctx));
   ctx->src_dir = strdup(src_dir);
   struct stat stbuf;
-  kstr tmp = {0, 0, 0};
+  sds tmp = sdsempty();
 
   remfs_list(ctx->src_dir, &ctx->fv);
   ctx->fwd_map = calloc(1, sizeof(uuid_fwd_map));
@@ -111,23 +103,24 @@ remfs_ctx *remfs_init(const char *src_dir) {
 
   RB_INIT(ctx->fwd_map);
   RB_INIT(ctx->rev_map);
-
-  ctx->members = cJSON_CreateArray();
   for (int i = 0; i < kv_size(ctx->fv); i++) {
     remfs_file *file = &kv_A(ctx->fv, i);
     if (file->deleted)
       continue;
-    tmp.n = 0;
+    sdsclear(tmp);
     if (file->filetype == PAGE) {
-      kstr_cat(&tmp, "%s/%s/%s.rm", ctx->src_dir, file->parent, file->uuid);
+      tmp = sdscatprintf(tmp, "%s/%s/%s.rm", ctx->src_dir, file->parent,
+                         file->uuid);
     } else {
-      kstr_cat(&tmp, "%s/%s.metadata", ctx->src_dir, file->uuid);
+      tmp = sdscatprintf(tmp, "%s/%s.metadata", ctx->src_dir, file->uuid);
     }
-    if (stat(tmp.a, &stbuf) == -1)
+    if (stat(tmp, &stbuf) == -1)
       continue;
     uuid_map_node *s = calloc(1, sizeof(uuid_map_node));
     s->file = file;
-    RB_INSERT(uuid_fwd_map, ctx->fwd_map, s);
+    if (RB_INSERT(uuid_fwd_map, ctx->fwd_map, s) != NULL) {
+      free(s);
+    }
   }
 
   for (int i = 0; i < kv_size(ctx->fv); i++) {
@@ -135,11 +128,17 @@ remfs_ctx *remfs_init(const char *src_dir) {
     uuid_map_node *s = remfs_uuid_search(ctx, file->uuid);
     if (s == NULL)
       continue;
-    s->path = gen_path(ctx, i);
-    RB_INSERT(uuid_rev_map, ctx->rev_map, s);
-    add_member(ctx, i, ctx->members);
+    if (s->path == NULL) {
+      s->path = gen_path(ctx, i);
+      if (RB_INSERT(uuid_rev_map, ctx->rev_map, s) != NULL) {
+        sdsfree(s->path);
+        s->path = NULL;
+      } else {
+        add_member(ctx, s);
+      }
+    }
   }
-  kv_destroy(tmp);
+  sdsfree(tmp);
   return ctx;
 }
 
@@ -164,8 +163,8 @@ static uint8_t *slurp(const char *path) {
   ret = malloc(meta_size + 1);
   if (!ret)
     goto cleanup;
-  fread(ret, 1, meta_size, f);
-  ret[meta_size] = '\0';
+  size_t bytes_read = fread(ret, 1, meta_size, f);
+  ret[bytes_read] = '\0';
 cleanup:
   fclose(f);
   return ret;
@@ -181,19 +180,40 @@ static void parse_meta(const char *path, remfs_file *file) {
   if (!json)
     goto cleanup;
 
-  snprintf(file->uuid, 36 + 1, strstr(path, ".metadata") - 36);
+  const char *filename = strrchr(path, '/');
+  if (filename) {
+    filename++;
+  } else {
+    filename = path;
+  }
+  snprintf(file->uuid, sizeof(file->uuid), "%.36s", filename);
+
   p = cJSON_GetObjectItem(json, "visibleName");
-  snprintf(file->visible_name, RM_PATH_MAX, "%s", cJSON_GetStringValue(p));
+  if (cJSON_IsString(p)) {
+    snprintf(file->visible_name, RM_PATH_MAX, "%s", cJSON_GetStringValue(p));
+    for (char *c = file->visible_name; *c; c++) {
+      if (*c == '/')
+        *c = '_';
+    }
+  } else {
+    snprintf(file->visible_name, RM_PATH_MAX, "Untitled");
+  }
 
   p = cJSON_GetObjectItem(json, "parent");
-  snprintf(file->parent, 64, cJSON_GetStringValue(p));
+  if (cJSON_IsString(p)) {
+    snprintf(file->parent, sizeof(file->parent), "%s", cJSON_GetStringValue(p));
+  } else {
+    file->parent[0] = '\0';
+  }
 
   p = cJSON_GetObjectItem(json, "type");
-  str = cJSON_GetStringValue(p);
-  if (strcmp(str, "DocumentType") == 0) {
-    file->type = DOCUMENT;
-  } else if (strcmp(str, "CollectionType") == 0) {
-    file->type = COLLECTION;
+  if (cJSON_IsString(p)) {
+    str = cJSON_GetStringValue(p);
+    if (strcmp(str, "DocumentType") == 0) {
+      file->type = DOCUMENT;
+    } else if (strcmp(str, "CollectionType") == 0) {
+      file->type = COLLECTION;
+    }
   }
 
   p = cJSON_GetObjectItem(json, "deleted");
@@ -210,16 +230,28 @@ static void parse_pagedata(const char *path, remfs_file *file,
   if (!in)
     return;
   int pg = kv_size(*fv) - file->page_count;
+  if (pg < 0 || pg >= kv_size(*fv)) {
+    fclose(in);
+    return;
+  }
   while (!feof(in)) {
     char buf[RM_PATH_MAX] = {0};
-    char *line = fgets(buf, 256, in);
+    char *line = fgets(buf, sizeof(buf), in);
     if (line) {
       size_t len = strlen(line);
-      if (len >= 64)
-        len = 64 - 1;
-      remfs_file *p = &kv_A(*fv, pg);
-      snprintf(p->template_name, len, "%s", line);
-      pg++;
+      while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == '\n' ||
+                         line[len - 1] == ' ' || line[len - 1] == '\t')) {
+        line[len - 1] = '\0';
+        len--;
+      }
+      if (len > 0) {
+        if (pg >= kv_size(*fv)) {
+          break;
+        }
+        remfs_file *p = &kv_A(*fv, pg);
+        snprintf(p->template_name, sizeof(p->template_name), "%s", line);
+        pg++;
+      }
     }
   }
   fclose(in);
@@ -237,42 +269,66 @@ static void parse_content(const char *path, remfs_file *file,
     goto cleanup;
 
   p = cJSON_GetObjectItem(json, "fileType");
-  str = cJSON_GetStringValue(p);
-  if (strcmp(str, "notebook") == 0) {
-    file->filetype = NOTEBOOK;
-  } else if (strcmp(str, "epub") == 0) {
-    file->filetype = EPUB;
-  } else if (strcmp(str, "pdf") == 0) {
-    file->filetype = PDF;
+  if (cJSON_IsString(p)) {
+    str = cJSON_GetStringValue(p);
+    if (strcmp(str, "notebook") == 0) {
+      file->filetype = NOTEBOOK;
+    } else if (strcmp(str, "epub") == 0) {
+      file->filetype = EPUB;
+    } else if (strcmp(str, "pdf") == 0) {
+      file->filetype = PDF;
+    }
   }
 
   p = cJSON_GetObjectItem(json, "dummyDocument");
   file->dummy = cJSON_IsTrue(p) ? true : false;
 
   p = cJSON_GetObjectItem(json, "orientation");
-  str = cJSON_GetStringValue(p);
-  file->landscape = (strcmp(str, "landscape") == 0);
+  if (cJSON_IsString(p)) {
+    str = cJSON_GetStringValue(p);
+    file->landscape = (strcmp(str, "landscape") == 0);
+  }
 
-  p = cJSON_GetObjectItem(json, "pageCount");
-  file->page_count = cJSON_GetNumberValue(p);
-
+  size_t doc_idx = kv_size(*fv);
   kv_push(remfs_file, *fv, *file);
+
   unsigned pn = 0;
   p = cJSON_GetObjectItem(json, "pages");
-  cJSON *n = NULL;
-  cJSON_ArrayForEach(n, p) {
-    remfs_file page = {.type = DOCUMENT,
-                       .filetype = PAGE,
-                       .page_count = 1,
-                       .deleted = file->deleted,
-                       .dummy = file->dummy,
-                       .landscape = file->landscape};
-    snprintf(page.uuid, 64, "%s", cJSON_GetStringValue(n));
-    snprintf(page.parent, 64, "%s", file->uuid);
-    snprintf(page.visible_name, RM_PATH_MAX, "page_%06u.rm", 1 + pn++);
-
-    kv_push(remfs_file, *fv, page);
+  if (!p) {
+    cJSON *cPages = cJSON_GetObjectItem(json, "cPages");
+    if (cPages) {
+      p = cJSON_GetObjectItem(cPages, "pages");
+    }
   }
+  if (cJSON_IsArray(p)) {
+    cJSON *n = NULL;
+    cJSON_ArrayForEach(n, p) {
+      const char *page_uuid = NULL;
+      if (cJSON_IsString(n)) {
+        page_uuid = cJSON_GetStringValue(n);
+      } else if (cJSON_IsObject(n)) {
+        cJSON *id_obj = cJSON_GetObjectItem(n, "id");
+        if (cJSON_IsString(id_obj)) {
+          page_uuid = cJSON_GetStringValue(id_obj);
+        }
+      }
+      if (page_uuid) {
+        remfs_file page = {.type = DOCUMENT,
+                           .filetype = PAGE,
+                           .page_count = 1,
+                           .deleted = file->deleted,
+                           .dummy = file->dummy,
+                           .landscape = file->landscape};
+        snprintf(page.uuid, sizeof(page.uuid), "%s", page_uuid);
+        snprintf(page.parent, sizeof(page.parent), "%s", file->uuid);
+        snprintf(page.visible_name, RM_PATH_MAX, "page_%06u", 1 + pn++);
+
+        kv_push(remfs_file, *fv, page);
+      }
+    }
+  }
+
+  kv_A(*fv, doc_idx).page_count = pn;
 
   cJSON_Delete(json);
 cleanup:
@@ -281,28 +337,28 @@ cleanup:
 
 int remfs_list(const char *path, remfs_file_vec *fv) {
   glob_t globbuf;
-  kstr glob_path = {0, 0, 0};
+  sds glob_path = sdsempty();
   remfs_file file;
 
-  kstr_cat(&glob_path, "%s/*.metadata", path);
+  glob_path = sdscatprintf(glob_path, "%s/*.metadata", path);
   globbuf.gl_offs = 0;
-  glob(glob_path.a, GLOB_NOSORT | GLOB_DOOFFS, NULL, &globbuf);
+  glob(glob_path, GLOB_NOSORT | GLOB_DOOFFS, NULL, &globbuf);
 
   for (int i = 0; i < globbuf.gl_pathc; i++) {
     memset(&file, 0, sizeof(remfs_file));
     parse_meta(globbuf.gl_pathv[i], &file);
     if (file.type == DOCUMENT) {
-      glob_path.n = 0;
-      kstr_cat(&glob_path, "%s/%s.content", path, file.uuid);
-      parse_content(glob_path.a, &file, fv);
-      glob_path.n = 0;
-      kstr_cat(&glob_path, "%s/%s.pagedata", path, file.uuid);
-      parse_pagedata(glob_path.a, &file, fv);
+      sdsclear(glob_path);
+      glob_path = sdscatprintf(glob_path, "%s/%s.content", path, file.uuid);
+      parse_content(glob_path, &file, fv);
+      sdsclear(glob_path);
+      glob_path = sdscatprintf(glob_path, "%s/%s.pagedata", path, file.uuid);
+      parse_pagedata(glob_path, &file, fv);
     } else {
       kv_push(remfs_file, *fv, file);
     }
   }
-  kv_destroy(glob_path);
+  sdsfree(glob_path);
   globfree(&globbuf);
   return 0;
 }
