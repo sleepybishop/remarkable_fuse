@@ -8,7 +8,7 @@ remfmt.o
 
 CPPFLAGS := -D_DEFAULT_SOURCE -D_FILE_OFFSET_BITS=64
 CFLAGS   := -O0 -g -std=c99 -Wall -I. -Ideps -Ideps/cJSON -Ideps/struct/include/struct
-LDLIBS   := -lm
+LDLIBS   := -lm -lpng
 
 all: remfs remfmt
 

@@ -39,11 +39,9 @@ It's also helpful for running external tools like handwriting recognition on you
  - Delete support
  - PDF/EPUB write support 
  - PDF/EPUB annotations overlay support
- - Fix template background support (currently disabled)
  - SVG Polyline to `.rm` write support
  - `*.highlights.json` annotation support
  - Typed text input parsing and rendering (v6 scene graph)
 
 ### Architecture & Performance TODOs
  - Build a live-sync watcher (`inotify`/`kqueue`) to update the filesystem map without remounting
- - [x] Decouple FUSE daemon dependencies completely from the `remfs` core library

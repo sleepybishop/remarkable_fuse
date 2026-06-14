@@ -8,7 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <kstr.h>
+#include "deps/sds/sds.h"
+#include <kvec.h>
 
 #define DEV_W 1404
 #define DEV_H 1872
@@ -29,6 +30,7 @@ typedef struct {
   bool landscape;
   bool annotation;
   char *template_name;
+  char *template_dir;
 } remfmt_render_params;
 
 typedef struct {
@@ -64,6 +66,9 @@ typedef struct {
 
   remfmt_seg_vec segments;
   int version;
+
+  bool has_custom_color;
+  uint32_t custom_color;
 } remfmt_stroke;
 
 typedef kvec_t(remfmt_stroke) remfmt_stroke_vec;
@@ -73,7 +78,9 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
                        remfmt_render_params *prm);
 void remfmt_render_svg(FILE *stream, remfmt_stroke_vec *strokes,
                        remfmt_render_params *prm);
+void remfmt_render_pdf(FILE *stream, remfmt_stroke_vec *strokes,
+                       remfmt_render_params *prm);
 void remfmt_stroke_cleanup(remfmt_stroke_vec *strokes);
-remfmt_stroke_vec *remfmt_parse(FILE *stream);
+remfmt_stroke_vec *remfmt_parse(const char *path);
 
 #endif

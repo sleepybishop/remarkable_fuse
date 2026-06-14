@@ -140,17 +140,19 @@ static void release_cached_entry(cache_entry *entry) {
 static bool enable_svg = true;
 static bool enable_png = true;
 static bool enable_pdf = true;
+static char *template_dir = NULL;
+
+static char *data_dir = NULL;
 
 static struct options {
-  const char *src_dir;
   const char *config_file;
   int show_help;
 } options;
 
 #define OPTION(t, p) {t, offsetof(struct options, p), 1}
 static const struct fuse_opt option_spec[] = {
-    OPTION("--source=%s", src_dir), OPTION("--config=%s", config_file),
-    OPTION("-h", show_help), OPTION("--help", show_help), FUSE_OPT_END};
+    OPTION("--config=%s", config_file), OPTION("-h", show_help),
+    OPTION("--help", show_help), FUSE_OPT_END};
 
 static void load_config(const char *path) {
   FILE *f = fopen(path, "rb");
@@ -179,46 +181,56 @@ static void load_config(const char *path) {
   buf[read_bytes] = '\0';
   fclose(f);
 
-  cJSON *json = cJSON_Parse(buf);
+  cJSON *root = cJSON_Parse(buf);
   free(buf);
-
-  if (!json) {
-    fprintf(stderr, "error parsing config file %s\n", path);
-    return;
-  }
-
-  cJSON *renderers = cJSON_GetObjectItem(json, "renderers");
-  if (cJSON_IsArray(renderers)) {
-    enable_svg = false;
-    enable_png = false;
-    enable_pdf = false;
-    cJSON *item = NULL;
-    cJSON_ArrayForEach(item, renderers) {
-      if (cJSON_IsString(item)) {
-        const char *val = cJSON_GetStringValue(item);
-        if (strcmp(val, "svg") == 0)
-          enable_svg = true;
-        else if (strcmp(val, "png") == 0)
-          enable_png = true;
-        else if (strcmp(val, "pdf") == 0)
-          enable_pdf = true;
-      }
+  if (root) {
+    cJSON *data_dir_cfg = cJSON_GetObjectItemCaseSensitive(root, "data_dir");
+    if (data_dir_cfg && cJSON_IsString(data_dir_cfg)) {
+      if (data_dir)
+        free(data_dir);
+      data_dir = strdup(data_dir_cfg->valuestring);
     }
-  } else {
-    cJSON *svg_item = cJSON_GetObjectItem(json, "svg");
-    if (cJSON_IsBool(svg_item))
-      enable_svg = cJSON_IsTrue(svg_item);
 
-    cJSON *png_item = cJSON_GetObjectItem(json, "png");
-    if (cJSON_IsBool(png_item))
-      enable_png = cJSON_IsTrue(png_item);
+    cJSON *tpl_dir = cJSON_GetObjectItemCaseSensitive(root, "template_dir");
+    if (tpl_dir && cJSON_IsString(tpl_dir)) {
+      if (template_dir)
+        free(template_dir);
+      template_dir = strdup(tpl_dir->valuestring);
+    }
 
-    cJSON *pdf_item = cJSON_GetObjectItem(json, "pdf");
-    if (cJSON_IsBool(pdf_item))
-      enable_pdf = cJSON_IsTrue(pdf_item);
+    cJSON *renderers = cJSON_GetObjectItemCaseSensitive(root, "renderers");
+    if (cJSON_IsArray(renderers)) {
+      enable_svg = false;
+      enable_png = false;
+      enable_pdf = false;
+      cJSON *item = NULL;
+      cJSON_ArrayForEach(item, renderers) {
+        if (cJSON_IsString(item)) {
+          const char *val = cJSON_GetStringValue(item);
+          if (strcmp(val, "svg") == 0)
+            enable_svg = true;
+          else if (strcmp(val, "png") == 0)
+            enable_png = true;
+          else if (strcmp(val, "pdf") == 0)
+            enable_pdf = true;
+        }
+      }
+    } else {
+      cJSON *svg_item = cJSON_GetObjectItem(root, "svg");
+      if (cJSON_IsBool(svg_item))
+        enable_svg = cJSON_IsTrue(svg_item);
+
+      cJSON *png_item = cJSON_GetObjectItem(root, "png");
+      if (cJSON_IsBool(png_item))
+        enable_png = cJSON_IsTrue(png_item);
+
+      cJSON *pdf_item = cJSON_GetObjectItem(root, "pdf");
+      if (cJSON_IsBool(pdf_item))
+        enable_pdf = cJSON_IsTrue(pdf_item);
+    }
+
+    cJSON_Delete(root);
   }
-
-  cJSON_Delete(json);
 }
 
 static sds munge_path(const char *path, int *flags) {
@@ -462,6 +474,7 @@ static cache_entry *generate_fake_ext(uuid_map_node *ref, const char *rmpath,
   if (strokes) {
     remfmt_render_params prm = {.landscape = ref->file->landscape,
                                 .template_name = ref->file->template_name,
+                                .template_dir = template_dir,
                                 .annotation = anot};
     if (strcmp(ext, "svg") == 0) {
       remfmt_render_svg(sh, strokes, &prm);
@@ -569,7 +582,8 @@ static int remfuse_read(const char *path, char *buf, size_t size, off_t offset,
 }
 
 static void *remfuse_init(struct fuse_conn_info *conn) {
-  remfs_ctx *ctx = remfs_init(options.src_dir);
+  const char *src = data_dir ? data_dir : DEFAULT_SOURCE;
+  remfs_ctx *ctx = remfs_init(src);
   // remfs_print(ctx, stderr);
   return ctx;
 }
@@ -592,11 +606,8 @@ static struct fuse_operations remfuse_ops = {
 static void usage(const char *progname) {
   printf("usage: %s [options] <mountpoint>\n\n", progname);
   printf("File-system specific options:\n"
-         "    --source=<s>        location of data dir\n"
-         "                        (default: \"%s\")\n"
          "    --config=<c>        path to config JSON file\n"
-         "\n",
-         DEFAULT_SOURCE);
+         "\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -604,7 +615,6 @@ int main(int argc, char *argv[]) {
   struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
   struct stat stbuf;
 
-  options.src_dir = DEFAULT_SOURCE;
   options.config_file = NULL;
 
   if (fuse_opt_parse(&args, &options, option_spec, NULL) == -1)
@@ -623,23 +633,17 @@ int main(int argc, char *argv[]) {
     usage(argv[0]);
     assert(fuse_opt_add_arg(&args, "--help") == 0);
     args.argv[0][0] = '\0';
-  } else if (options.src_dir) {
-    if (stat(options.src_dir, &stbuf) == -1) {
-      fprintf(stderr, "failed to access source dir [%s]: %s\n", options.src_dir,
+  } else {
+    const char *src = data_dir ? data_dir : DEFAULT_SOURCE;
+    if (stat(src, &stbuf) == -1) {
+      fprintf(stderr, "failed to access data dir [%s]: %s\n", src,
               strerror(errno));
       goto cleanup;
     }
     if (!S_ISDIR(stbuf.st_mode)) {
-      fprintf(stderr, "source dir [%s] is not a directory\n", options.src_dir);
+      fprintf(stderr, "data dir [%s] is not a directory\n", src);
       goto cleanup;
     }
-    /*
-    if (options.src_dir && options.src_dir[0] != '/') {
-      fprintf(stderr, "source dir [%s] is not an absolute path\n",
-              options.src_dir);
-      goto cleanup;
-    }
-    */
   }
   ret = fuse_main(args.argc, args.argv, &remfuse_ops, NULL);
 cleanup:

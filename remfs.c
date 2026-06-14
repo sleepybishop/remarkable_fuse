@@ -329,6 +329,7 @@ static void parse_content(const char *path, remfs_file *file,
   }
 
   kv_A(*fv, doc_idx).page_count = pn;
+  file->page_count = pn;
 
   cJSON_Delete(json);
 cleanup:
