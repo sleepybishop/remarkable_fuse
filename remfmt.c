@@ -315,7 +315,7 @@ static png_brush_meta get_png_brush(unsigned pen_type) {
     break;
   case 5: // Highlighter v1
     bm.alpha = 0.3f;
-    bm.width_scale = 4.0f;
+    bm.width_scale = 2.0f;
     break;
   case 6: // Eraser
     bm.alpha = 1.0f;
@@ -358,7 +358,7 @@ static png_brush_meta get_png_brush(unsigned pen_type) {
     break;
   case 18: // Highlighter v2
     bm.alpha = 0.3f;
-    bm.width_scale = 4.0f;
+    bm.width_scale = 1.0f;
     break;
   case 21: // Calligraphy
     bm.alpha = 1.0f;
@@ -375,7 +375,7 @@ static png_brush_meta get_png_brush(unsigned pen_type) {
 }
 
 typedef struct {
-  uint8_t r, g, b;
+  uint8_t r, g, b, a;
 } canvas_pixel;
 
 static uint32_t png_crc_table[256];
@@ -443,17 +443,17 @@ static void write_png_to_stream(FILE *stream, canvas_pixel *canvas, int width,
   ihdr[6] = (uint8_t)((height >> 8) & 0xff);
   ihdr[7] = (uint8_t)(height & 0xff);
   ihdr[8] = 8;
-  ihdr[9] = 2;
+  ihdr[9] = 6; // Color type 6: RGBA
   ihdr[10] = 0;
   ihdr[11] = 0;
   ihdr[12] = 0;
   custom_png_write_chunk(stream, "IHDR", ihdr, 13);
 
-  size_t u_size = (size_t)height * (1 + (size_t)width * 3);
-  uint8_t *u_buf = malloc(u_size);
-  if (!u_buf)
+  size_t u_size = ((size_t)width * 4 + 1) * (size_t)height;
+  uint8_t *u_buf = calloc(1, u_size);
+  if (!u_buf) {
     return;
-
+  }
   size_t u_ptr = 0;
   for (int y = 0; y < height; y++) {
     u_buf[u_ptr++] = 0;
@@ -461,6 +461,7 @@ static void write_png_to_stream(FILE *stream, canvas_pixel *canvas, int width,
       u_buf[u_ptr++] = canvas[y * width + x].r;
       u_buf[u_ptr++] = canvas[y * width + x].g;
       u_buf[u_ptr++] = canvas[y * width + x].b;
+      u_buf[u_ptr++] = canvas[y * width + x].a;
     }
   }
 
@@ -573,12 +574,23 @@ static void draw_circle(canvas_pixel *canvas, uint8_t *mask, int width,
           float final_alpha = alpha * coverage;
           canvas_pixel *pixel = &canvas[idx];
 
-          pixel->r = (uint8_t)(src_r * final_alpha +
-                               pixel->r * (1.0f - final_alpha) + 0.5f);
-          pixel->g = (uint8_t)(src_g * final_alpha +
-                               pixel->g * (1.0f - final_alpha) + 0.5f);
-          pixel->b = (uint8_t)(src_b * final_alpha +
-                               pixel->b * (1.0f - final_alpha) + 0.5f);
+          float dst_a = pixel->a / 255.0f;
+          float out_a = final_alpha + dst_a * (1.0f - final_alpha);
+          if (out_a > 0.001f) {
+            pixel->r = (uint8_t)((src_r * final_alpha +
+                                  pixel->r * dst_a * (1.0f - final_alpha)) /
+                                     out_a +
+                                 0.5f);
+            pixel->g = (uint8_t)((src_g * final_alpha +
+                                  pixel->g * dst_a * (1.0f - final_alpha)) /
+                                     out_a +
+                                 0.5f);
+            pixel->b = (uint8_t)((src_b * final_alpha +
+                                  pixel->b * dst_a * (1.0f - final_alpha)) /
+                                     out_a +
+                                 0.5f);
+            pixel->a = (uint8_t)(out_a * 255.0f + 0.5f);
+          }
         }
       }
     }
@@ -659,12 +671,23 @@ static void draw_segment(canvas_pixel *canvas, uint8_t *mask, int width,
           float final_alpha = alpha * coverage;
           canvas_pixel *pixel = &canvas[idx];
 
-          pixel->r = (uint8_t)(src_r * final_alpha +
-                               pixel->r * (1.0f - final_alpha) + 0.5f);
-          pixel->g = (uint8_t)(src_g * final_alpha +
-                               pixel->g * (1.0f - final_alpha) + 0.5f);
-          pixel->b = (uint8_t)(src_b * final_alpha +
-                               pixel->b * (1.0f - final_alpha) + 0.5f);
+          float dst_a = pixel->a / 255.0f;
+          float out_a = final_alpha + dst_a * (1.0f - final_alpha);
+          if (out_a > 0.001f) {
+            pixel->r = (uint8_t)((src_r * final_alpha +
+                                  pixel->r * dst_a * (1.0f - final_alpha)) /
+                                     out_a +
+                                 0.5f);
+            pixel->g = (uint8_t)((src_g * final_alpha +
+                                  pixel->g * dst_a * (1.0f - final_alpha)) /
+                                     out_a +
+                                 0.5f);
+            pixel->b = (uint8_t)((src_b * final_alpha +
+                                  pixel->b * dst_a * (1.0f - final_alpha)) /
+                                     out_a +
+                                 0.5f);
+            pixel->a = (uint8_t)(out_a * 255.0f + 0.5f);
+          }
         }
       }
     }
@@ -674,14 +697,18 @@ static void draw_segment(canvas_pixel *canvas, uint8_t *mask, int width,
 void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
                        remfmt_render_params *prm) {
   float min_x = 0.0f;
-  float max_x = (float)DEV_W;
+  float max_x =
+      (prm && prm->canvas_width > 0.0f) ? prm->canvas_width : (float)DEV_W;
   float min_y = 0.0f;
-  float max_y = (float)DEV_H;
+  float max_y =
+      (prm && prm->canvas_height > 0.0f) ? prm->canvas_height : (float)DEV_H;
 
-  if (strokes != NULL) {
+  if (strokes != NULL && !(prm && prm->annotation)) {
     for (int i = 0; i < kv_size(*strokes); i++) {
       remfmt_stroke *st = &kv_A(*strokes, i);
-      float xOffset = (st->version == 6) ? ((float)DEV_W / 2.0f) : 0.0f;
+      float dev_w =
+          (prm && prm->canvas_width > 0.0f) ? prm->canvas_width : (float)DEV_W;
+      float xOffset = (st->version == 6) ? (dev_w / 2.0f) : 0.0f;
       for (int j = 0; j < kv_size(st->segments); j++) {
         remfmt_seg sg = kv_A(st->segments, j);
         float x = sg.x + xOffset;
@@ -713,11 +740,15 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
   if (!canvas) {
     return;
   }
-  memset(canvas, 255, (size_t)width * (size_t)height * sizeof(canvas_pixel));
+  if (prm && prm->annotation) {
+    memset(canvas, 0, (size_t)width * (size_t)height * sizeof(canvas_pixel));
+  } else {
+    memset(canvas, 255, (size_t)width * (size_t)height * sizeof(canvas_pixel));
+  }
 
   uint8_t *mask = malloc((size_t)width * (size_t)height);
 
-  if (prm && prm->template_dir && prm->template_name &&
+  if (prm && !prm->annotation && prm->template_dir && prm->template_name &&
       prm->template_name[0] != '\0') {
     sds tpl_path = sdsempty();
     tpl_path = sdscatprintf(tpl_path, "%s/%s.png", prm->template_dir,
@@ -775,9 +806,12 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
                            : 0x000000;
       }
 
-      float xOffset = (st->version == 6) ? ((float)DEV_W / 2.0f) : 0.0f;
+      float dev_w_st =
+          (prm && prm->canvas_width > 0.0f) ? prm->canvas_width : (float)DEV_W;
+      float xOffset = (st->version == 6) ? (dev_w_st / 2.0f) : 0.0f;
 
       bool is_hl = (pen_type == 5 || pen_type == 18);
+
       int box_min_x = 0, box_max_x = 0, box_min_y = 0, box_max_y = 0;
       if (is_hl && mask != NULL) {
         float s_min_x = 1e9f, s_max_x = -1e9f, s_min_y = 1e9f, s_max_y = -1e9f;
@@ -791,7 +825,7 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
             x = rx;
             y = ry;
           }
-          float r = sg.width / 2.0f;
+          float r = (sg.width * st->width * bm.width_scale) / 4.0f + 2.0f;
           if (x - r < s_min_x)
             s_min_x = x - r;
           if (x + r > s_max_x)
@@ -829,12 +863,7 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
           x = rx;
           y = ry;
         }
-        float r;
-        if (is_hl) {
-          r = pt.width / 2.0f;
-        } else {
-          r = (pt.width * st->width * bm.width_scale) / 4.0f;
-        }
+        float r = (pt.width * st->width * bm.width_scale) / 4.0f;
         if (r < 0.5f)
           r = 0.5f;
 
@@ -861,13 +890,8 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
             y2 = ry2;
           }
 
-          float segWidth;
-          if (is_hl) {
-            segWidth = (prev.width + curr.width) / 2.0f;
-          } else {
-            segWidth = ((prev.width + curr.width) / 2.0f) * (st->width / 2.0f) *
-                       bm.width_scale * 0.5f;
-          }
+          float segWidth = ((prev.width + curr.width) / 2.0f) *
+                           (st->width / 2.0f) * bm.width_scale * 0.5f;
           if (segWidth < 0.4f)
             segWidth = 0.4f;
 
@@ -892,12 +916,23 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
               float final_alpha = alpha * coverage;
               canvas_pixel *pixel = &canvas[idx];
 
-              pixel->r = (uint8_t)(src_r * final_alpha +
-                                   pixel->r * (1.0f - final_alpha) + 0.5f);
-              pixel->g = (uint8_t)(src_g * final_alpha +
-                                   pixel->g * (1.0f - final_alpha) + 0.5f);
-              pixel->b = (uint8_t)(src_b * final_alpha +
-                                   pixel->b * (1.0f - final_alpha) + 0.5f);
+              float dst_a = pixel->a / 255.0f;
+              float out_a = final_alpha + dst_a * (1.0f - final_alpha);
+              if (out_a > 0.001f) {
+                pixel->r = (uint8_t)((src_r * final_alpha +
+                                      pixel->r * dst_a * (1.0f - final_alpha)) /
+                                         out_a +
+                                     0.5f);
+                pixel->g = (uint8_t)((src_g * final_alpha +
+                                      pixel->g * dst_a * (1.0f - final_alpha)) /
+                                         out_a +
+                                     0.5f);
+                pixel->b = (uint8_t)((src_b * final_alpha +
+                                      pixel->b * dst_a * (1.0f - final_alpha)) /
+                                         out_a +
+                                     0.5f);
+                pixel->a = (uint8_t)(out_a * 255.0f + 0.5f);
+              }
             }
           }
         }
@@ -919,7 +954,7 @@ void remfmt_render_svg(FILE *stream, remfmt_stroke_vec *strokes,
   float min_y = 0.0f;
   float max_y = (float)DEV_H;
 
-  if (strokes != NULL) {
+  if (strokes != NULL && !(prm && prm->annotation)) {
     for (int i = 0; i < kv_size(*strokes); i++) {
       remfmt_stroke *st = &kv_A(*strokes, i);
       float xOffset = (st->version == 6) ? ((float)DEV_W / 2.0f) : 0.0f;
@@ -1010,6 +1045,12 @@ void remfmt_render_svg(FILE *stream, remfmt_stroke_vec *strokes,
 
       float xOffset = (st.version == 6) ? ((float)DEV_W / 2.0f) : 0.0f;
 
+      if (kv_size(st.segments) > 0) {
+        remfmt_seg first_sg = kv_A(st.segments, 0);
+        lsw = get_seg_width(&st, &first_sg);
+        seg_width = lsw;
+      }
+
       sds pv = sdsempty();
       for (int j = 0; j < kv_size(st.segments); j++) {
         remfmt_seg sg = kv_A(st.segments, j);
@@ -1027,7 +1068,7 @@ void remfmt_render_svg(FILE *stream, remfmt_stroke_vec *strokes,
         seg_alpha = get_seg_alpha(&st, &sg);
 
         pv = sdscatprintf(pv, fmt, x, y);
-        if (lsw != seg_width) {
+        if (fabsf(lsw - seg_width) > 0.08f * lsw) {
           fprintf(stream, svg_tpl[SVG_POLYLINE], seg_color, lsw, seg_alpha,
                   st.square_cap ? "square" : "round", pv);
           sdsclear(pv);
@@ -1052,7 +1093,7 @@ void remfmt_render_pdf(FILE *stream, remfmt_stroke_vec *strokes,
   float min_y = 0.0f;
   float max_y = (float)DEV_H;
 
-  if (strokes != NULL) {
+  if (strokes != NULL && !(prm && prm->annotation)) {
     for (int i = 0; i < kv_size(*strokes); i++) {
       remfmt_stroke *st = &kv_A(*strokes, i);
       float xOffset = (st->version == 6) ? ((float)DEV_W / 2.0f) : 0.0f;
@@ -1107,7 +1148,18 @@ void remfmt_render_pdf(FILE *stream, remfmt_stroke_vec *strokes,
       float seg_width = st.calc_width, lsw = seg_width;
       float xOffset = (st.version == 6) ? ((float)DEV_W / 2.0f) : 0.0f;
 
+      float seg_alpha = get_seg_alpha(&st, &kv_A(st.segments, 0));
+      const char *gs_state = "/GS100";
+      if (seg_alpha < 0.15) {
+        gs_state = "/GS10";
+      } else if (seg_alpha < 0.35) {
+        gs_state = "/GS25";
+      } else if (seg_alpha < 0.95) {
+        gs_state = "/GS90";
+      }
+
       pdf_content = sdscatprintf(pdf_content, "q\n");
+      pdf_content = sdscatprintf(pdf_content, "%s gs\n", gs_state);
       pdf_content = sdscatprintf(pdf_content, "%.3f w\n", seg_width);
       pdf_content = sdscatprintf(pdf_content, "%.3f %.3f %.3f RG\n", r, g, b);
       pdf_content = sdscatprintf(pdf_content, "%d J\n", st.square_cap ? 2 : 1);
@@ -1145,13 +1197,12 @@ void remfmt_render_pdf(FILE *stream, remfmt_stroke_vec *strokes,
         float yp = (float)height - y;
         seg_width = get_seg_width(&st, &sg);
 
-        if (lsw != seg_width) {
+        pdf_content = sdscatprintf(pdf_content, "%.3f %.3f l\n", x, yp);
+        if (fabsf(lsw - seg_width) > 0.08f * lsw) {
           pdf_content = sdscatprintf(pdf_content, "S\n");
           pdf_content = sdscatprintf(pdf_content, "%.3f w\n", seg_width);
           pdf_content = sdscatprintf(pdf_content, "%.3f %.3f m\n", x, yp);
           lsw = seg_width;
-        } else {
-          pdf_content = sdscatprintf(pdf_content, "%.3f %.3f l\n", x, yp);
         }
       }
       pdf_content = sdscatprintf(pdf_content, "S\nQ\n");
@@ -1182,18 +1233,24 @@ void remfmt_render_pdf(FILE *stream, remfmt_stroke_vec *strokes,
 
   offsets[3] = (long)sdslen(pdf);
   if (tdata) {
-    pdf =
-        sdscatprintf(pdf,
-                     "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [ 0 0 %d "
-                     "%d ] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 "
-                     "R >> >> >>\nendobj\n",
-                     width, height);
+    pdf = sdscatprintf(
+        pdf,
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [ 0 0 %d "
+        "%d ] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 "
+        "R >> /ExtGState << /GS25 << /Type /ExtGState /ca 0.25 /CA 0.25 >> "
+        "/GS90 << /Type /ExtGState /ca 0.90 /CA 0.90 >> /GS10 << /Type "
+        "/ExtGState /ca 0.10 /CA 0.10 >> /GS100 << /Type /ExtGState /ca 1.00 "
+        "/CA 1.00 >> >> >> >>\nendobj\n",
+        width, height);
   } else {
-    pdf =
-        sdscatprintf(pdf,
-                     "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [ 0 0 %d "
-                     "%d ] /Contents 4 0 R /Resources << >> >>\nendobj\n",
-                     width, height);
+    pdf = sdscatprintf(
+        pdf,
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [ 0 0 %d "
+        "%d ] /Contents 4 0 R /Resources << /ExtGState << /GS25 << /Type "
+        "/ExtGState /ca 0.25 /CA 0.25 >> /GS90 << /Type /ExtGState /ca 0.90 "
+        "/CA 0.90 >> /GS10 << /Type /ExtGState /ca 0.10 /CA 0.10 >> /GS100 << "
+        "/Type /ExtGState /ca 1.00 /CA 1.00 >> >> >> >>\nendobj\n",
+        width, height);
   }
 
   offsets[4] = (long)sdslen(pdf);
@@ -1241,6 +1298,312 @@ void remfmt_render_pdf(FILE *stream, remfmt_stroke_vec *strokes,
   fwrite(pdf, 1, sdslen(pdf), stream);
   sdsfree(pdf);
   sdsfree(pdf_content);
+}
+
+void remfmt_render_notebook_pdf(FILE *stream, int num_pages,
+                                remfmt_stroke_vec **pages_strokes,
+                                remfmt_render_params **pages_prms) {
+  if (num_pages <= 0)
+    return;
+
+  typedef struct {
+    sds path;
+    unsigned char *tdata;
+    int tw;
+    int th;
+    int obj_id;
+  } unique_template;
+
+  int *page_obj_ids = malloc(num_pages * sizeof(int));
+  int *contents_obj_ids = malloc(num_pages * sizeof(int));
+  int *page_template_obj_ids = calloc(num_pages, sizeof(int));
+
+  unique_template *utemplates = calloc(num_pages, sizeof(unique_template));
+  int num_utemplates = 0;
+
+  // 1. Gather all unique templates and load them once
+  for (int i = 0; i < num_pages; i++) {
+    remfmt_render_params *prm = pages_prms[i];
+    if (prm && prm->template_dir && prm->template_name &&
+        prm->template_name[0] != '\0') {
+      sds tpl_path = sdscatprintf(sdsempty(), "%s/%s.png", prm->template_dir,
+                                  prm->template_name);
+
+      int found_idx = -1;
+      for (int j = 0; j < num_utemplates; j++) {
+        if (sdscmp(utemplates[j].path, tpl_path) == 0) {
+          found_idx = j;
+          break;
+        }
+      }
+
+      if (found_idx == -1) {
+        int tw = 0, th = 0;
+        unsigned char *tdata = load_png_template(tpl_path, &tw, &th);
+        if (tdata != NULL) {
+          utemplates[num_utemplates].path = sdsdup(tpl_path);
+          utemplates[num_utemplates].tdata = tdata;
+          utemplates[num_utemplates].tw = tw;
+          utemplates[num_utemplates].th = th;
+          utemplates[num_utemplates].obj_id = 0; // will assign later
+          num_utemplates++;
+        }
+      }
+      sdsfree(tpl_path);
+    }
+  }
+
+  // 2. Assign PDF object IDs
+  int next_id = 3;
+  for (int i = 0; i < num_pages; i++) {
+    page_obj_ids[i] = next_id++;
+    contents_obj_ids[i] = next_id++;
+  }
+
+  for (int j = 0; j < num_utemplates; j++) {
+    utemplates[j].obj_id = next_id++;
+  }
+
+  // Map each page to its unique template's PDF object ID
+  for (int i = 0; i < num_pages; i++) {
+    remfmt_render_params *prm = pages_prms[i];
+    if (prm && prm->template_dir && prm->template_name &&
+        prm->template_name[0] != '\0') {
+      sds tpl_path = sdscatprintf(sdsempty(), "%s/%s.png", prm->template_dir,
+                                  prm->template_name);
+      for (int j = 0; j < num_utemplates; j++) {
+        if (sdscmp(utemplates[j].path, tpl_path) == 0) {
+          page_template_obj_ids[i] = utemplates[j].obj_id;
+          break;
+        }
+      }
+      sdsfree(tpl_path);
+    }
+  }
+
+  int total_objs = next_id;
+  long *offsets = calloc(total_objs, sizeof(long));
+
+  sds pdf = sdsempty();
+  pdf = sdscat(pdf, "%PDF-1.4\n");
+
+  offsets[1] = (long)sdslen(pdf);
+  pdf = sdscat(pdf, "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+  offsets[2] = (long)sdslen(pdf);
+  pdf = sdscat(pdf, "2 0 obj\n<< /Type /Pages /Kids [ ");
+  for (int i = 0; i < num_pages; i++) {
+    pdf = sdscatprintf(pdf, "%d 0 R ", page_obj_ids[i]);
+  }
+  pdf = sdscatprintf(pdf, "] /Count %d >>\nendobj\n", num_pages);
+
+  // 3. Render pages
+  for (int i = 0; i < num_pages; i++) {
+    remfmt_stroke_vec *strokes = pages_strokes[i];
+    remfmt_render_params *prm = pages_prms[i];
+
+    float min_x = 0.0f;
+    float max_x = (float)DEV_W;
+    float min_y = 0.0f;
+    float max_y = (float)DEV_H;
+
+    if (strokes != NULL && !(prm && prm->annotation)) {
+      for (int k = 0; k < kv_size(*strokes); k++) {
+        remfmt_stroke *st = &kv_A(*strokes, k);
+        float xOffset = (st->version == 6) ? ((float)DEV_W / 2.0f) : 0.0f;
+        for (int j = 0; j < kv_size(st->segments); j++) {
+          remfmt_seg sg = kv_A(st->segments, j);
+          float x = sg.x + xOffset;
+          float y = sg.y;
+          if (x < min_x)
+            min_x = x;
+          if (x > max_x)
+            max_x = x;
+          if (y < min_y)
+            min_y = y;
+          if (y > max_y)
+            max_y = y;
+        }
+      }
+    }
+
+    int port_w = (int)ceilf(max_x - min_x);
+    int port_h = (int)ceilf(max_y - min_y);
+    int width = port_w;
+    int height = port_h;
+    if (prm && prm->landscape) {
+      width = port_h;
+      height = port_w;
+    }
+
+    sds pdf_content = sdsempty();
+    if (strokes != NULL) {
+      for (int k = 0; k < kv_size(*strokes); k++) {
+        remfmt_stroke st = kv_A(*strokes, k);
+        set_pen_attr(&st);
+        int num_points = kv_size(st.segments);
+        if (num_points == 0)
+          continue;
+
+        uint32_t seg_color;
+        if (st.has_custom_color) {
+          seg_color = st.custom_color;
+        } else {
+          seg_color = (st.color < sizeof(svg_color) / sizeof(svg_color[0]))
+                          ? svg_color[st.color]
+                          : 0x000000;
+        }
+
+        float r = ((seg_color >> 16) & 0xff) / 255.0f;
+        float g = ((seg_color >> 8) & 0xff) / 255.0f;
+        float b = (seg_color & 0xff) / 255.0f;
+
+        float seg_width = st.calc_width, lsw = seg_width;
+        float xOffset = (st.version == 6) ? ((float)DEV_W / 2.0f) : 0.0f;
+
+        float seg_alpha = get_seg_alpha(&st, &kv_A(st.segments, 0));
+        const char *gs_state = "/GS100";
+        if (seg_alpha < 0.15) {
+          gs_state = "/GS10";
+        } else if (seg_alpha < 0.35) {
+          gs_state = "/GS25";
+        } else if (seg_alpha < 0.95) {
+          gs_state = "/GS90";
+        }
+
+        pdf_content = sdscatprintf(pdf_content, "q\n");
+        pdf_content = sdscatprintf(pdf_content, "%s gs\n", gs_state);
+        pdf_content = sdscatprintf(pdf_content, "%.3f w\n", seg_width);
+        pdf_content = sdscatprintf(pdf_content, "%.3f %.3f %.3f RG\n", r, g, b);
+        pdf_content =
+            sdscatprintf(pdf_content, "%d J\n", st.square_cap ? 2 : 1);
+        pdf_content = sdscatprintf(pdf_content, "1 j\n");
+
+        remfmt_seg pt0 = kv_A(st.segments, 0);
+        float x0 = pt0.x + xOffset - min_x;
+        float y0 = pt0.y - min_y;
+        if (prm && prm->landscape) {
+          float rx = (float)port_h - y0;
+          float ry = x0;
+          x0 = rx;
+          y0 = ry;
+        }
+        float yp0 = (float)height - y0;
+        pdf_content = sdscatprintf(pdf_content, "%.3f %.3f m\n", x0, yp0);
+
+        if (num_points == 1) {
+          pdf_content = sdscatprintf(pdf_content, "%.3f %.3f l\n", x0, yp0);
+        }
+
+        for (int j = 1; j < num_points; j++) {
+          remfmt_seg sg = kv_A(st.segments, j);
+          float x = sg.x + xOffset - min_x;
+          float y = sg.y - min_y;
+
+          if (prm && prm->landscape) {
+            float rx = (float)port_h - y;
+            float ry = x;
+            x = rx;
+            y = ry;
+          }
+
+          float yp = (float)height - y;
+          seg_width = get_seg_width(&st, &sg);
+
+          pdf_content = sdscatprintf(pdf_content, "%.3f %.3f l\n", x, yp);
+          if (fabsf(lsw - seg_width) > 0.08f * lsw) {
+            pdf_content = sdscatprintf(pdf_content, "S\n");
+            pdf_content = sdscatprintf(pdf_content, "%.3f w\n", seg_width);
+            pdf_content = sdscatprintf(pdf_content, "%.3f %.3f m\n", x, yp);
+            lsw = seg_width;
+          }
+        }
+        pdf_content = sdscatprintf(pdf_content, "S\nQ\n");
+      }
+    }
+
+    offsets[page_obj_ids[i]] = (long)sdslen(pdf);
+    if (page_template_obj_ids[i] != 0) {
+      pdf = sdscatprintf(
+          pdf,
+          "%d 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [ 0 0 %d "
+          "%d ] /Contents %d 0 R /Resources << /XObject << /Im1 %d 0 "
+          "R >> /ExtGState << /GS25 << /Type /ExtGState /ca 0.25 /CA 0.25 >> "
+          "/GS90 << /Type /ExtGState /ca 0.90 /CA 0.90 >> /GS10 << /Type "
+          "/ExtGState /ca 0.10 /CA 0.10 >> /GS100 << /Type /ExtGState /ca 1.00 "
+          "/CA 1.00 >> >> >> >>\nendobj\n",
+          page_obj_ids[i], width, height, contents_obj_ids[i],
+          page_template_obj_ids[i]);
+    } else {
+      pdf = sdscatprintf(
+          pdf,
+          "%d 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [ 0 0 %d "
+          "%d ] /Contents %d 0 R /Resources << /ExtGState << /GS25 << /Type "
+          "/ExtGState /ca 0.25 /CA 0.25 >> /GS90 << /Type /ExtGState /ca 0.90 "
+          "/CA 0.90 >> /GS10 << /Type /ExtGState /ca 0.10 /CA 0.10 >> /GS100 "
+          "<< /Type /ExtGState /ca 1.00 /CA 1.00 >> >> >> >>\nendobj\n",
+          page_obj_ids[i], width, height, contents_obj_ids[i]);
+    }
+
+    offsets[contents_obj_ids[i]] = (long)sdslen(pdf);
+    if (page_template_obj_ids[i] != 0) {
+      sds bg = sdsempty();
+      if (prm && prm->landscape) {
+        bg = sdscatprintf(bg, "q\n0 %d -%d 0 %d 0 cm\n/Im1 Do\nQ\n", height,
+                          width, width);
+      } else {
+        bg = sdscatprintf(bg, "q\n%d 0 0 %d 0 0 cm\n/Im1 Do\nQ\n", width,
+                          height);
+      }
+      bg = sdscatsds(bg, pdf_content);
+      sdsfree(pdf_content);
+      pdf_content = bg;
+    }
+
+    pdf = sdscatprintf(
+        pdf, "%d 0 obj\n<< /Length %ld >>\nstream\n%s\nendstream\nendobj\n",
+        contents_obj_ids[i], (long)sdslen(pdf_content), pdf_content);
+    sdsfree(pdf_content);
+  }
+
+  // 4. Render unique template image objects
+  for (int j = 0; j < num_utemplates; j++) {
+    offsets[utemplates[j].obj_id] = (long)sdslen(pdf);
+    pdf = sdscatprintf(
+        pdf,
+        "%d 0 obj\n<< /Type /XObject /Subtype /Image /Width %d /Height %d "
+        "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Length %ld >>\nstream\n",
+        utemplates[j].obj_id, utemplates[j].tw, utemplates[j].th,
+        (long)(utemplates[j].tw * utemplates[j].th * 3));
+    pdf = sdscatlen(pdf, utemplates[j].tdata,
+                    utemplates[j].tw * utemplates[j].th * 3);
+    pdf = sdscat(pdf, "\nendstream\nendobj\n");
+  }
+
+  long xref_pos = (long)sdslen(pdf);
+  pdf = sdscatprintf(pdf, "xref\n0 %d\n", total_objs);
+  pdf = sdscat(pdf, "0000000000 65535 f \n");
+  for (int i = 1; i < total_objs; i++) {
+    pdf = sdscatprintf(pdf, "%010ld 00000 n \n", offsets[i]);
+  }
+
+  pdf = sdscatprintf(pdf, "trailer\n<< /Size %d /Root 1 0 R >>\n", total_objs);
+  pdf = sdscatprintf(pdf, "startxref\n%ld\n%%%%EOF\n", xref_pos);
+
+  fwrite(pdf, 1, sdslen(pdf), stream);
+  sdsfree(pdf);
+
+  // 5. Cleanup
+  for (int j = 0; j < num_utemplates; j++) {
+    sdsfree(utemplates[j].path);
+    free(utemplates[j].tdata);
+  }
+  free(utemplates);
+
+  free(page_obj_ids);
+  free(contents_obj_ids);
+  free(page_template_obj_ids);
+  free(offsets);
 }
 
 void remfmt_stroke_cleanup(remfmt_stroke_vec *strokes) {
@@ -1450,6 +1813,7 @@ static void parse_scene_line_item(rm_buf *b, uint8_t version,
                              (float)direction * (3.1415926535f * 2.0f) / 255.0f,
                          .width = (float)width / 4.0f,
                          .pressure = (float)pressure / 255.0f};
+
         kv_push(remfmt_seg, st.segments, sg);
       }
 
@@ -1482,6 +1846,89 @@ static void parse_scene_line_item(rm_buf *b, uint8_t version,
   }
 }
 
+static void parse_scene_glyph_item(rm_buf *b, uint32_t version,
+                                   remfmt_stroke_vec *strokes,
+                                   size_t block_body_pos, size_t block_length) {
+  uint8_t p1 = 0;
+  uint64_t p2 = 0;
+
+  if (!read_tag(b, 1, TAG_TYPE_ID))
+    return;
+  read_crdt_id(b, &p1, &p2);
+
+  if (!read_tag(b, 2, TAG_TYPE_ID))
+    return;
+  read_crdt_id(b, &p1, &p2);
+
+  if (!read_tag(b, 3, TAG_TYPE_ID))
+    return;
+  read_crdt_id(b, &p1, &p2);
+
+  if (!read_tag(b, 4, TAG_TYPE_ID))
+    return;
+  read_crdt_id(b, &p1, &p2);
+
+  if (!read_tag(b, 5, TAG_TYPE_BYTE4))
+    return;
+  read_uint32(b); // deleted_length
+
+  if (check_tag(b, 6, TAG_TYPE_LENGTH4)) {
+    read_tag(b, 6, TAG_TYPE_LENGTH4);
+    uint32_t subblock_len = read_uint32(b);
+    size_t subblock_start = b->pos;
+
+    uint8_t item_type = read_uint8(b);
+    if (item_type == 0x01) { // glyph item
+      if (!read_tag(b, 4, TAG_TYPE_BYTE4))
+        goto skip_subblock;
+      uint32_t color_id = read_uint32(b);
+
+      if (!read_tag(b, 5, TAG_TYPE_LENGTH4))
+        goto skip_subblock;
+      uint32_t rects_len = read_uint32(b);
+      (void)rects_len;
+
+      uint64_t num_rects = read_varuint(b);
+
+      for (uint64_t i = 0; i < num_rects; i++) {
+        double x = read_float64(b);
+        double y = read_float64(b);
+        double w = read_float64(b);
+        double h = read_float64(b);
+
+        remfmt_stroke st = {0};
+        st.version = 6;
+        st.pen = 18; // HIGHLIGHTER_2
+        st.color = color_id;
+        st.width = 1.0f;
+        st.layer = 0;
+        st.has_custom_color = false;
+        st.custom_color = 0;
+
+        remfmt_seg sg1 = {.x = (float)x,
+                          .y = (float)(y + h / 2.0),
+                          .speed = 1.0f,
+                          .tilt = 0.0f,
+                          .width = (float)h * 4.0f,
+                          .pressure = 1.0f};
+        kv_push(remfmt_seg, st.segments, sg1);
+
+        remfmt_seg sg2 = {.x = (float)(x + w),
+                          .y = (float)(y + h / 2.0),
+                          .speed = 1.0f,
+                          .tilt = 0.0f,
+                          .width = (float)h * 4.0f,
+                          .pressure = 1.0f};
+        kv_push(remfmt_seg, st.segments, sg2);
+
+        kv_push(remfmt_stroke, *strokes, st);
+      }
+    }
+  skip_subblock:
+    b->pos = subblock_start + subblock_len;
+  }
+}
+
 static remfmt_stroke_vec *remfmt_parse_v6(rm_buf *b) {
   remfmt_stroke_vec *strokes = calloc(1, sizeof(remfmt_stroke_vec));
   if (strokes == NULL)
@@ -1508,6 +1955,9 @@ static remfmt_stroke_vec *remfmt_parse_v6(rm_buf *b) {
     if (block_type == 0x05) { // BlockTypeSceneLineItem
       parse_scene_line_item(b, current_version, strokes, block_body_pos,
                             block_length);
+    } else if (block_type == 0x03) { // BlockTypeSceneGlyphItem
+      parse_scene_glyph_item(b, current_version, strokes, block_body_pos,
+                             block_length);
     }
 
     b->pos = block_body_pos + block_length;

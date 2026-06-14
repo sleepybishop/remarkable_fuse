@@ -7,3 +7,5 @@ remfs
 remfmt
 xochitl
 remarkable
+pdfoverlay
+t/test_remfs

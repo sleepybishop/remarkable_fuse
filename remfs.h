@@ -34,6 +34,10 @@ typedef struct {
   bool landscape;
   size_t page_count;
   bool dummy;
+  int margins;
+  double custom_zoom_scale;
+  int custom_zoom_page_height;
+  int custom_zoom_page_width;
 } remfs_file;
 
 typedef kvec_t(remfs_file) remfs_file_vec;

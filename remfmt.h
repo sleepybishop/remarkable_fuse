@@ -31,6 +31,8 @@ typedef struct {
   bool annotation;
   char *template_name;
   char *template_dir;
+  float canvas_width;
+  float canvas_height;
 } remfmt_render_params;
 
 typedef struct {
@@ -80,6 +82,9 @@ void remfmt_render_svg(FILE *stream, remfmt_stroke_vec *strokes,
                        remfmt_render_params *prm);
 void remfmt_render_pdf(FILE *stream, remfmt_stroke_vec *strokes,
                        remfmt_render_params *prm);
+void remfmt_render_notebook_pdf(FILE *stream, int num_pages,
+                                remfmt_stroke_vec **pages_strokes,
+                                remfmt_render_params **pages_prms);
 void remfmt_stroke_cleanup(remfmt_stroke_vec *strokes);
 remfmt_stroke_vec *remfmt_parse(const char *path);
 

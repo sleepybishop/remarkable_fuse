@@ -85,8 +85,10 @@ static void add_member(remfs_ctx *ctx, uuid_map_node *s) {
     kv_push(uuid_map_node *, ctx->root_children, s);
   } else {
     uuid_map_node *ref = remfs_uuid_search(ctx, s->file->parent);
-    if (!ref)
+    if (!ref) {
+      kv_push(uuid_map_node *, ctx->root_children, s);
       return;
+    }
     kv_push(uuid_map_node *, ref->children, s);
   }
 }
@@ -154,12 +156,12 @@ static uint8_t *slurp(const char *path) {
   FILE *f = fopen(path, "rb");
   if (!f)
     return ret;
-  size_t meta_size = 0;
   fseek(f, 0, SEEK_END);
-  meta_size = ftell(f);
+  long size = ftell(f);
   fseek(f, 0, SEEK_SET);
-  if (meta_size <= 0)
+  if (size <= 0)
     goto cleanup;
+  size_t meta_size = size;
   ret = malloc(meta_size + 1);
   if (!ret)
     goto cleanup;
@@ -237,6 +239,8 @@ static void parse_pagedata(const char *path, remfs_file *file,
   while (!feof(in)) {
     char buf[RM_PATH_MAX] = {0};
     char *line = fgets(buf, sizeof(buf), in);
+    if (!line)
+      break;
     if (line) {
       size_t len = strlen(line);
       while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == '\n' ||
@@ -287,6 +291,34 @@ static void parse_content(const char *path, remfs_file *file,
   if (cJSON_IsString(p)) {
     str = cJSON_GetStringValue(p);
     file->landscape = (strcmp(str, "landscape") == 0);
+  }
+
+  p = cJSON_GetObjectItem(json, "margins");
+  if (cJSON_IsNumber(p)) {
+    file->margins = p->valueint;
+  } else {
+    file->margins = 0;
+  }
+
+  p = cJSON_GetObjectItem(json, "customZoomScale");
+  if (cJSON_IsNumber(p)) {
+    file->custom_zoom_scale = p->valuedouble;
+  } else {
+    file->custom_zoom_scale = 0.0;
+  }
+
+  p = cJSON_GetObjectItem(json, "customZoomPageHeight");
+  if (cJSON_IsNumber(p)) {
+    file->custom_zoom_page_height = p->valueint;
+  } else {
+    file->custom_zoom_page_height = 0;
+  }
+
+  p = cJSON_GetObjectItem(json, "customZoomPageWidth");
+  if (cJSON_IsNumber(p)) {
+    file->custom_zoom_page_width = p->valueint;
+  } else {
+    file->custom_zoom_page_width = 0;
   }
 
   size_t doc_idx = kv_size(*fv);

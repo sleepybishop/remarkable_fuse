@@ -6,10 +6,9 @@ A FUSE filesystem for reMarkable tablets using version 2.x or 3.x of their softw
 This allows you to backup the reMarkable while still retaining access to your documents without requiring the use of USB or cloud services. It's also helpful for running external tools like handwriting recognition on your documents. 
 
 ### Features
- - Provides a tree view of documents as they appear in the interface.
- - Notebooks and PDF/EPUB annotations are exposed as folders.
- - Auto-conversion of `.rm` files into **SVG, PNG, and PDF** formats.
- - Page backgrounds (grids, lined paper) are automatically embedded into the exported SVG, PNG, and PDF files using the `templates/` directory.
+ - Provides a filesystem view of documents as they appear in the tablet.
+ - Auto-conversion of `.rm` files into svg, png and pdf formats.
+ - Page backgrounds (grids, lined paper) are automatically embedded into documents using the  `templates/` directory.
  - Auto-landscape rotation on all exported files.
 
 ### Screenshot
@@ -55,6 +54,6 @@ You can also use the standalone `remfmt` binary to convert individual `.rm` file
 ./remfmt --template-dir templates --template-name "P Grid small" input.rm pdf > output.pdf
 ```
 
-### TODO
+### NOT IMPLEMENTED
  - Typed text input parsing and rendering (v6 scene graph)
 

@@ -16,6 +16,7 @@
 
 #include "cJSON.h"
 #include "deps/sds/sds.h"
+#include "pdfoverlay.h"
 #include "remfmt.h"
 #include "remfs.h"
 
@@ -24,6 +25,10 @@
 #define IS_ANNOT_PAGE (1 << 2)
 #define IS_PNG (1 << 3)
 #define IS_PDF (1 << 4)
+#define IS_ANNOTATED_PDF (1 << 5)
+#define IS_SVG_DIR (1 << 6)
+#define IS_PNG_DIR (1 << 7)
+#define IS_PDF_DIR (1 << 8)
 
 #define DEFAULT_SOURCE "./xochitl"
 #define CACHE_SIZE 128
@@ -38,6 +43,12 @@ typedef struct cache_entry {
   struct cache_entry *prev;
   struct cache_entry *next;
 } cache_entry;
+
+static bool pdf_has_annotations(remfs_ctx *ctx, uuid_map_node *ref)
+    __attribute__((unused));
+static cache_entry *generate_annotated_pdf(remfs_ctx *ctx, uuid_map_node *ref,
+                                           const char *orig_pdf_path);
+static cache_entry *generate_notebook_pdf(remfs_ctx *ctx, uuid_map_node *ref);
 
 static cache_entry *cache_head = NULL;
 static cache_entry *cache_tail = NULL;
@@ -110,6 +121,8 @@ static cache_entry *add_to_cache(const char *uuid, const char *type,
 
   while (cache_count > CACHE_SIZE) {
     cache_entry *tail = cache_tail;
+    if (!tail)
+      break;
     cache_tail = tail->prev;
     if (cache_tail)
       cache_tail->next = NULL;
@@ -142,7 +155,7 @@ static bool enable_svg = true;
 static bool enable_png = true;
 static bool enable_pdf = true;
 static bool enable_mutable = false;
-static bool enable_standalone_annotations = true;
+static bool enable_standalone_annotations = false;
 static char *template_dir = NULL;
 
 static char *data_dir = NULL;
@@ -253,8 +266,39 @@ static sds munge_path(const char *path, int *flags) {
   bool is_svg = false;
   bool is_png = false;
   bool is_pdf = false;
+  bool is_annotated_pdf = false;
+  bool is_svg_dir = false;
+  bool is_png_dir = false;
+  bool is_pdf_dir = false;
 
-  if (len >= 4 && strcmp(ret + len - 4, ".svg") == 0) {
+  if (len >= 4 && strcmp(ret + len - 4, "/svg") == 0) {
+    ret[len - 4] = '\0';
+    is_svg_dir = true;
+  } else if (len >= 4 && strcmp(ret + len - 4, "/png") == 0) {
+    ret[len - 4] = '\0';
+    is_png_dir = true;
+  } else if (len >= 4 && strcmp(ret + len - 4, "/pdf") == 0) {
+    ret[len - 4] = '\0';
+    is_pdf_dir = true;
+  } else {
+    char *p;
+    if ((p = strstr(ret, "/svg/")) != NULL) {
+      memmove(p + 1, p + 5, strlen(p + 5) + 1);
+    } else if ((p = strstr(ret, "/png/")) != NULL) {
+      memmove(p + 1, p + 5, strlen(p + 5) + 1);
+    } else if ((p = strstr(ret, "/pdf/")) != NULL) {
+      memmove(p + 1, p + 5, strlen(p + 5) + 1);
+    }
+  }
+
+  sdsupdatelen(ret);
+  len = sdslen(ret);
+
+  if (len >= 14 && strcmp(ret + len - 14, ".annotated.pdf") == 0) {
+    ret[len - 14] = '\0';
+    is_pdf = true;
+    is_annotated_pdf = true;
+  } else if (len >= 4 && strcmp(ret + len - 4, ".svg") == 0) {
     ret[len - 4] = '\0';
     is_svg = true;
   } else if (len >= 4 && strcmp(ret + len - 4, ".png") == 0) {
@@ -294,8 +338,12 @@ static sds munge_path(const char *path, int *flags) {
     *flags |= is_svg ? IS_SVG : 0;
     *flags |= is_png ? IS_PNG : 0;
     *flags |= is_pdf ? IS_PDF : 0;
+    *flags |= is_annotated_pdf ? IS_ANNOTATED_PDF : 0;
     *flags |= is_annot_dir ? IS_ANNOT_DIR : 0;
     *flags |= is_annot_page ? IS_ANNOT_PAGE : 0;
+    *flags |= is_svg_dir ? IS_SVG_DIR : 0;
+    *flags |= is_png_dir ? IS_PNG_DIR : 0;
+    *flags |= is_pdf_dir ? IS_PDF_DIR : 0;
   }
   return ret;
 }
@@ -307,11 +355,36 @@ static uuid_map_node *rewrite_path(remfs_ctx *ctx, const char *path, int *flags,
   if (!ref && (*flags & (IS_SVG | IS_PNG | IS_PDF))) {
     ref = remfs_path_search(ctx, path);
     if (ref) {
-      *flags &= ~(IS_SVG | IS_PNG | IS_PDF);
+      *flags &= ~(IS_SVG | IS_PNG | IS_PDF | IS_ANNOTATED_PDF);
     }
   }
   if (ref && ref->file->filetype != PAGE) {
-    *flags &= ~(IS_SVG | IS_PNG | IS_PDF);
+    if ((ref->file->filetype == PDF || ref->file->filetype == NOTEBOOK) &&
+        (*flags & IS_PDF) && enable_pdf) {
+      // Keep IS_PDF flag
+    } else {
+      *flags &= ~(IS_SVG | IS_PNG | IS_PDF | IS_ANNOTATED_PDF);
+    }
+  }
+  if (ref && ref->file->filetype == PAGE && (*flags & IS_PDF)) {
+    bool parent_is_notebook = false;
+    if (ref->file->parent[0] != '\0') {
+      uuid_map_node *parent_node = remfs_uuid_search(ctx, ref->file->parent);
+      if (parent_node && parent_node->file &&
+          parent_node->file->filetype == NOTEBOOK) {
+        parent_is_notebook = true;
+      }
+    }
+    if (parent_is_notebook) {
+      sdsfree(munged);
+      return NULL;
+    }
+  }
+  if (ref && ref->file->filetype == NOTEBOOK && !(*flags & IS_PDF)) {
+    if (!enable_png && !enable_svg && !enable_mutable) {
+      sdsfree(munged);
+      return NULL;
+    }
   }
   if (ref && newpath) {
     if (ref->file->type == COLLECTION) {
@@ -370,12 +443,12 @@ static uint8_t *slurp(const char *path) {
   FILE *f = fopen(path, "rb");
   if (!f)
     return ret;
-  size_t meta_size = 0;
   fseek(f, 0, SEEK_END);
-  meta_size = ftell(f);
+  long size = ftell(f);
   fseek(f, 0, SEEK_SET);
-  if (meta_size <= 0)
+  if (size <= 0)
     goto cleanup;
+  size_t meta_size = size;
   ret = malloc(meta_size + 1);
   if (!ret)
     goto cleanup;
@@ -386,19 +459,63 @@ cleanup:
   return ret;
 }
 
+static bool is_path_virtual(const char *path) {
+  if (strstr(path, "/svg/") != NULL || strstr(path, "/png/") != NULL ||
+      strstr(path, "/pdf/") != NULL || strstr(path, " Annotations/") != NULL) {
+    return true;
+  }
+  size_t len = strlen(path);
+  if (len >= 4 && strcmp(path + len - 4, "/svg") == 0)
+    return true;
+  if (len >= 4 && strcmp(path + len - 4, "/png") == 0)
+    return true;
+  if (len >= 4 && strcmp(path + len - 4, "/pdf") == 0)
+    return true;
+  if (len >= 12 && strcmp(path + len - 12, " Annotations") == 0)
+    return true;
+  return false;
+}
+
 static int remfuse_getattr(const char *path, struct stat *stbuf) {
   int ret = -ENOENT;
   struct fuse_context *fuse_ctx = fuse_get_context();
   remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
   memset(stbuf, 0, sizeof(struct stat));
+  int flags = 0;
   pthread_mutex_lock(&remfs_mutex);
   if (strcmp(path, "/") == 0) {
     ret = stat(ctx->src_dir, stbuf);
   } else {
-    int flags = 0;
     sds newpath = sdsempty();
     uuid_map_node *ref = rewrite_path(ctx, path, &flags, &newpath);
-    if (sdslen(newpath) > 0) {
+    if (flags & (IS_SVG_DIR | IS_PNG_DIR | IS_PDF_DIR)) {
+      bool allowed = false;
+      if ((flags & IS_SVG_DIR) && enable_svg)
+        allowed = true;
+      if ((flags & IS_PNG_DIR) && enable_png)
+        allowed = true;
+      if ((flags & IS_PDF_DIR) && enable_pdf)
+        allowed = true;
+      if ((flags & IS_PDF_DIR) && !(flags & IS_ANNOT_DIR)) {
+        allowed = false;
+      }
+
+      if (allowed && ref) {
+        stbuf->st_mode = S_IFDIR | 0555;
+        stbuf->st_nlink = 2;
+        stbuf->st_uid = getuid();
+        stbuf->st_gid = getgid();
+        struct stat src_st;
+        if (stat(ctx->src_dir, &src_st) == 0) {
+          stbuf->st_atime = src_st.st_atime;
+          stbuf->st_mtime = src_st.st_mtime;
+          stbuf->st_ctime = src_st.st_ctime;
+        }
+        ret = 0;
+      } else {
+        ret = -ENOENT;
+      }
+    } else if (sdslen(newpath) > 0) {
       if (ref) {
         bool allowed = false;
         if ((flags & IS_SVG) && enable_svg)
@@ -409,17 +526,72 @@ static int remfuse_getattr(const char *path, struct stat *stbuf) {
           allowed = true;
 
         if ((flags & (IS_SVG | IS_PNG | IS_PDF)) && allowed) {
-          ret = stat(newpath, stbuf);
-          if (ret == 0) {
-            const char *type_str =
-                (flags & IS_SVG) ? "svg" : ((flags & IS_PDF) ? "pdf" : "png");
+          if (ref->file->filetype == NOTEBOOK && (flags & IS_PDF)) {
+            stbuf->st_mode = S_IFREG | 0444;
+            stbuf->st_nlink = 1;
+            sds meta_path = sdscatprintf(sdsempty(), "%s/%s.metadata",
+                                         ctx->src_dir, ref->file->uuid);
+            struct stat meta_st;
+            time_t latest_mtime = 1;
+            if (stat(meta_path, &meta_st) == 0) {
+              latest_mtime = meta_st.st_mtime;
+            }
+            sdsfree(meta_path);
+
             cache_entry *cached =
-                get_cached_entry(ref->file->uuid, type_str, stbuf->st_mtime);
+                get_cached_entry(ref->file->uuid, "pdf", latest_mtime);
             if (cached) {
               stbuf->st_size = cached->size;
+              stbuf->st_mtime = cached->mtime;
               release_cached_entry(cached);
             } else {
-              stbuf->st_size = 5 * 1024 * 1024;
+              stbuf->st_size = ref->file->page_count * 1024 * 1024;
+              if (stbuf->st_size < 1024 * 1024) {
+                stbuf->st_size = 1024 * 1024;
+              }
+              stbuf->st_mtime = latest_mtime;
+            }
+            ret = 0;
+          } else {
+            ret = stat(newpath, stbuf);
+            if (ret == 0) {
+              const char *type_str =
+                  (flags & IS_SVG) ? "svg" : ((flags & IS_PDF) ? "pdf" : "png");
+              if (ref->file->filetype == PDF && (flags & IS_PDF)) {
+                if (flags & IS_ANNOTATED_PDF) {
+                  cache_entry *entry =
+                      generate_annotated_pdf(ctx, ref, newpath);
+                  if (entry) {
+                    stbuf->st_size = entry->size;
+                    release_cached_entry(entry);
+                  }
+                }
+              } else {
+                time_t latest_mtime = stbuf->st_mtime;
+                for (size_t i = 0; i < kv_size(ref->children); i++) {
+                  uuid_map_node *page = kv_A(ref->children, i);
+                  if (page && page->file->filetype == PAGE) {
+                    sds rm_path =
+                        sdscatprintf(sdsempty(), "%s/%s/%s.rm", ctx->src_dir,
+                                     ref->file->uuid, page->file->uuid);
+                    struct stat rm_st;
+                    if (stat(rm_path, &rm_st) == 0) {
+                      if (rm_st.st_mtime > latest_mtime) {
+                        latest_mtime = rm_st.st_mtime;
+                      }
+                    }
+                    sdsfree(rm_path);
+                  }
+                }
+                cache_entry *cached =
+                    get_cached_entry(ref->file->uuid, type_str, latest_mtime);
+                if (cached) {
+                  stbuf->st_size = cached->size;
+                  release_cached_entry(cached);
+                } else {
+                  stbuf->st_size = 5 * 1024 * 1024;
+                }
+              }
             }
           }
         } else if ((flags & (IS_SVG | IS_PNG | IS_PDF)) && !allowed) {
@@ -432,7 +604,9 @@ static int remfuse_getattr(const char *path, struct stat *stbuf) {
     sdsfree(newpath);
   }
   if (ret == 0) {
-    if (enable_mutable) {
+    if (enable_mutable &&
+        !(flags & (IS_ANNOTATED_PDF | IS_SVG | IS_PNG | IS_PDF | IS_SVG_DIR |
+                   IS_PNG_DIR | IS_PDF_DIR))) {
       stbuf->st_mode |= 0200;
     } else {
       stbuf->st_mode &= ~0200;
@@ -509,24 +683,72 @@ static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
   filler(buf, ".", NULL, 0);
   filler(buf, "..", NULL, 0);
 
+  bool is_notebook_dir = false;
+  bool is_annot_root_dir = false;
+  if (strcmp(path, "/") != 0) {
+    uuid_map_node *ref = rewrite_path(ctx, path, &flags, NULL);
+    if (ref) {
+      if (ref->file->filetype == NOTEBOOK &&
+          !(flags & (IS_SVG_DIR | IS_PNG_DIR | IS_PDF_DIR))) {
+        is_notebook_dir = true;
+      }
+      if ((flags & IS_ANNOT_DIR) &&
+          !(flags & (IS_SVG_DIR | IS_PNG_DIR | IS_PDF_DIR))) {
+        is_annot_root_dir = true;
+      }
+    }
+  }
+
+  if (is_notebook_dir) {
+    if (enable_svg)
+      filler(buf, "svg", NULL, 0);
+    if (enable_png)
+      filler(buf, "png", NULL, 0);
+  }
+  if (is_annot_root_dir) {
+    if (enable_svg)
+      filler(buf, "svg", NULL, 0);
+    if (enable_png)
+      filler(buf, "png", NULL, 0);
+    if (enable_pdf)
+      filler(buf, "pdf", NULL, 0);
+  }
+
   for (size_t i = 0; i < kv_size(*n); i++) {
     uuid_map_node *s = kv_A(*n, i);
     if (!s)
       continue;
+
+    if ((flags & (IS_SVG_DIR | IS_PNG_DIR | IS_PDF_DIR)) &&
+        s->file->filetype != PAGE) {
+      continue;
+    }
+
     if (s->file->filetype == PAGE) {
       if (flags & IS_ANNOT_DIR) {
         if (!has_annotations(ctx->src_dir, s->file)) {
           continue;
         }
       }
-      if (enable_svg)
-        fill_fake_ext(buf, filler, s->file, ".svg");
-      if (enable_png)
-        fill_fake_ext(buf, filler, s->file, ".png");
-      if (enable_pdf)
-        fill_fake_ext(buf, filler, s->file, ".pdf");
-      if (enable_mutable)
-        fill_fake_ext(buf, filler, s->file, ".rm");
+      if (flags & IS_SVG_DIR) {
+        if (enable_svg) {
+          fill_fake_ext(buf, filler, s->file, ".svg");
+        }
+      } else if (flags & IS_PNG_DIR) {
+        if (enable_png) {
+          fill_fake_ext(buf, filler, s->file, ".png");
+        }
+      } else if (flags & IS_PDF_DIR) {
+        if (enable_pdf) {
+          fill_fake_ext(buf, filler, s->file, ".pdf");
+        }
+      } else {
+        if (!(flags & IS_ANNOT_DIR)) {
+          if (enable_mutable) {
+            fill_fake_ext(buf, filler, s->file, ".rm");
+          }
+        }
+      }
     } else if (s->file->filetype == PDF || s->file->filetype == EPUB) {
       if (enable_standalone_annotations) {
         fill_fake_folder(buf, filler, s->file);
@@ -535,12 +757,240 @@ static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
       tmp = sdscat(tmp, s->file->filetype == PDF ? ".pdf" : ".epub");
       filler(buf, tmp, NULL, 0);
       sdsfree(tmp);
+      if (s->file->filetype == PDF) {
+        sds tmp_annot = sdsnew(s->file->visible_name);
+        tmp_annot = sdscat(tmp_annot, ".annotated.pdf");
+        filler(buf, tmp_annot, NULL, 0);
+        sdsfree(tmp_annot);
+      }
     } else {
-      filler(buf, s->file->visible_name, NULL, 0);
+      bool show_folder = true;
+      if (s->file->filetype == NOTEBOOK) {
+        if (!enable_png && !enable_svg && !enable_mutable) {
+          show_folder = false;
+        }
+      }
+      if (show_folder) {
+        filler(buf, s->file->visible_name, NULL, 0);
+      }
+      if (s->file->filetype == NOTEBOOK && enable_pdf) {
+        fill_fake_ext(buf, filler, s->file, ".pdf");
+      }
     }
   }
   pthread_mutex_unlock(&remfs_mutex);
   return 0;
+}
+
+static bool __attribute__((unused)) pdf_has_annotations(remfs_ctx *ctx,
+                                                        uuid_map_node *ref) {
+  if (!ref || !ref->file || ref->file->filetype != PDF) {
+    return false;
+  }
+  for (size_t i = 0; i < kv_size(ref->children); i++) {
+    uuid_map_node *page = kv_A(ref->children, i);
+    if (!page || page->file->filetype != PAGE)
+      continue;
+    sds rm_path = sdscatprintf(sdsempty(), "%s/%s/%s.rm", ctx->src_dir,
+                               ref->file->uuid, page->file->uuid);
+    struct stat st;
+    if (stat(rm_path, &st) == 0 && st.st_size > 43) {
+      sdsfree(rm_path);
+      return true;
+    }
+    sdsfree(rm_path);
+  }
+  return false;
+}
+
+static cache_entry *generate_annotated_pdf(remfs_ctx *ctx, uuid_map_node *ref,
+                                           const char *orig_pdf_path) {
+  if (!ref || !ref->file || ref->file->filetype != PDF) {
+    return NULL;
+  }
+  struct stat st;
+  if (stat(orig_pdf_path, &st) == -1) {
+    return NULL;
+  }
+
+  time_t latest_mtime = st.st_mtime;
+  for (size_t i = 0; i < kv_size(ref->children); i++) {
+    uuid_map_node *page = kv_A(ref->children, i);
+    if (!page || page->file->filetype != PAGE)
+      continue;
+    sds rm_path = sdscatprintf(sdsempty(), "%s/%s/%s.rm", ctx->src_dir,
+                               ref->file->uuid, page->file->uuid);
+    struct stat rm_st;
+    if (stat(rm_path, &rm_st) == 0) {
+      if (rm_st.st_mtime > latest_mtime) {
+        latest_mtime = rm_st.st_mtime;
+      }
+    }
+    sdsfree(rm_path);
+  }
+
+  cache_entry *cached = get_cached_entry(ref->file->uuid, "pdf", latest_mtime);
+  if (cached) {
+    return cached;
+  }
+
+  sds current_pdf = sdsnew(orig_pdf_path);
+  int page_num = 0;
+  for (size_t i = 0; i < kv_size(ref->children); i++) {
+    uuid_map_node *page = kv_A(ref->children, i);
+    if (!page || page->file->filetype != PAGE)
+      continue;
+    page_num++;
+
+    int actual_page_num = page_num;
+    sscanf(page->file->visible_name, "page_%u", &actual_page_num);
+
+    sds rm_path = sdscatprintf(sdsempty(), "%s/%s/%s.rm", ctx->src_dir,
+                               ref->file->uuid, page->file->uuid);
+    struct stat rm_st;
+    if (stat(rm_path, &rm_st) == 0 && rm_st.st_size > 43) {
+      char png_tmp_path[] = "/tmp/remfs_annot_XXXXXX";
+      int png_fd = mkstemp(png_tmp_path);
+      if (png_fd != -1) {
+        FILE *png_fp = fdopen(png_fd, "wb");
+        if (png_fp) {
+          int overlay_margins = 0;
+          remfmt_stroke_vec *strokes = remfmt_parse(rm_path);
+          if (strokes) {
+            remfmt_render_params prm = {.landscape = page->file->landscape,
+                                        .template_name =
+                                            page->file->template_name,
+                                        .template_dir = template_dir,
+                                        .annotation = true};
+            if (ref->file->custom_zoom_page_height > 0 &&
+                ref->file->custom_zoom_page_width > 0) {
+              prm.canvas_width = ref->file->custom_zoom_page_width;
+              prm.canvas_height = ref->file->custom_zoom_page_height;
+              overlay_margins = 0;
+            } else {
+              prm.canvas_width = DEV_W;
+              prm.canvas_height = DEV_H;
+              overlay_margins = ref->file->margins;
+            }
+
+            remfmt_render_png(png_fp, strokes, &prm);
+            remfmt_stroke_cleanup(strokes);
+          }
+          fclose(png_fp);
+
+          struct stat png_st;
+          stat(png_tmp_path, &png_st);
+
+          char pdf_tmp_path[] = "/tmp/remfs_pdf_XXXXXX";
+          int pdf_fd = mkstemp(pdf_tmp_path);
+          if (pdf_fd != -1) {
+            close(pdf_fd);
+            int err =
+                pdf_overlay_png(current_pdf, png_tmp_path, pdf_tmp_path,
+                                actual_page_num, 0, 0, 0, 0, overlay_margins);
+            if (err == 0) {
+              if (strcmp(current_pdf, orig_pdf_path) != 0) {
+                unlink(current_pdf);
+              }
+              sdsfree(current_pdf);
+              current_pdf = sdsnew(pdf_tmp_path);
+            } else {
+              unlink(pdf_tmp_path);
+            }
+          }
+        }
+        unlink(png_tmp_path);
+      }
+    }
+    sdsfree(rm_path);
+  }
+
+  uint8_t *final_data = slurp(current_pdf);
+  struct stat final_st;
+  size_t final_size = 0;
+  if (stat(current_pdf, &final_st) == 0) {
+    final_size = final_st.st_size;
+  }
+  if (strcmp(current_pdf, orig_pdf_path) != 0) {
+    unlink(current_pdf);
+  }
+  sdsfree(current_pdf);
+
+  if (!final_data) {
+    return NULL;
+  }
+
+  return add_to_cache(ref->file->uuid, "pdf", latest_mtime, final_data,
+                      final_size);
+}
+
+static cache_entry *generate_notebook_pdf(remfs_ctx *ctx, uuid_map_node *ref) {
+  int page_count = 0;
+  for (size_t i = 0; i < kv_size(ref->children); i++) {
+    uuid_map_node *page = kv_A(ref->children, i);
+    if (page && page->file->filetype == PAGE) {
+      page_count++;
+    }
+  }
+
+  sds meta_path =
+      sdscatprintf(sdsempty(), "%s/%s.metadata", ctx->src_dir, ref->file->uuid);
+  struct stat meta_st;
+  time_t latest_mtime = 1;
+  if (stat(meta_path, &meta_st) == 0) {
+    latest_mtime = meta_st.st_mtime;
+  }
+  sdsfree(meta_path);
+
+  cache_entry *cached = get_cached_entry(ref->file->uuid, "pdf", latest_mtime);
+  if (cached) {
+    return cached;
+  }
+
+  uint8_t *data = NULL;
+  size_t size = 0;
+  FILE *sh = open_memstream((char **)&data, &size);
+  if (!sh)
+    return NULL;
+
+  remfmt_stroke_vec **pages_strokes =
+      calloc(page_count, sizeof(remfmt_stroke_vec *));
+  remfmt_render_params **pages_prms =
+      calloc(page_count, sizeof(remfmt_render_params *));
+
+  int idx = 0;
+  for (size_t i = 0; i < kv_size(ref->children); i++) {
+    uuid_map_node *page = kv_A(ref->children, i);
+    if (page && page->file->filetype == PAGE) {
+      sds rm_path = sdscatprintf(sdsempty(), "%s/%s/%s.rm", ctx->src_dir,
+                                 ref->file->uuid, page->file->uuid);
+      pages_strokes[idx] = remfmt_parse(rm_path);
+      sdsfree(rm_path);
+
+      pages_prms[idx] = malloc(sizeof(remfmt_render_params));
+      pages_prms[idx]->landscape = page->file->landscape;
+      pages_prms[idx]->template_name = page->file->template_name;
+      pages_prms[idx]->template_dir = template_dir;
+      pages_prms[idx]->annotation = false;
+      idx++;
+    }
+  }
+
+  remfmt_render_notebook_pdf(sh, page_count, pages_strokes, pages_prms);
+  fclose(sh);
+
+  for (int i = 0; i < page_count; i++) {
+    if (pages_strokes[i]) {
+      remfmt_stroke_cleanup(pages_strokes[i]);
+    }
+    if (pages_prms[i]) {
+      free(pages_prms[i]);
+    }
+  }
+  free(pages_strokes);
+  free(pages_prms);
+
+  return add_to_cache(ref->file->uuid, "pdf", latest_mtime, data, size);
 }
 
 static cache_entry *generate_fake_ext(uuid_map_node *ref, const char *rmpath,
@@ -588,13 +1038,18 @@ static int remfuse_open(const char *path, struct fuse_file_info *fi) {
   struct fuse_context *fuse_ctx = fuse_get_context();
   remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
 
-  if ((fi->flags & (O_WRONLY | O_RDWR)) && !enable_mutable)
-    return -EROFS;
-
   pthread_mutex_lock(&remfs_mutex);
   int flags = 0;
   sds newpath = sdsempty();
   uuid_map_node *ref = rewrite_path(ctx, path, &flags, &newpath);
+
+  if ((fi->flags & (O_WRONLY | O_RDWR)) &&
+      (!enable_mutable ||
+       (flags & (IS_ANNOTATED_PDF | IS_SVG | IS_PNG | IS_PDF)))) {
+    sdsfree(newpath);
+    pthread_mutex_unlock(&remfs_mutex);
+    return -EROFS;
+  }
 
   if (flags & (IS_SVG | IS_PNG | IS_PDF)) {
     bool allowed = false;
@@ -623,16 +1078,44 @@ static int remfuse_open(const char *path, struct fuse_file_info *fi) {
     pthread_mutex_unlock(&remfs_mutex);
     return 0;
   } else if (ref && (flags & IS_PDF) && enable_pdf) {
-    cache_entry *entry =
-        generate_fake_ext(ref, newpath, flags & IS_ANNOT_PAGE, "pdf");
-    sdsfree(newpath);
-    if (!entry) {
+    cache_entry *entry = NULL;
+    if (flags & IS_ANNOTATED_PDF) {
+      entry = generate_annotated_pdf(ctx, ref, newpath);
+      if (entry) {
+        sdsfree(newpath);
+        fi->fh = MAKE_CACHE_PTR(entry);
+        pthread_mutex_unlock(&remfs_mutex);
+        return 0;
+      }
+      sdsfree(newpath);
+      pthread_mutex_unlock(&remfs_mutex);
+      return -ENOENT;
+    } else {
+      if (ref->file->filetype == PDF) {
+        int fd = open(newpath, fi->flags);
+        sdsfree(newpath);
+        if (fd == -1) {
+          pthread_mutex_unlock(&remfs_mutex);
+          return -errno;
+        }
+        fi->fh = fd;
+        pthread_mutex_unlock(&remfs_mutex);
+        return 0;
+      } else if (ref->file->filetype == NOTEBOOK) {
+        entry = generate_notebook_pdf(ctx, ref);
+      } else {
+        entry = generate_fake_ext(ref, newpath, flags & IS_ANNOT_PAGE, "pdf");
+      }
+      if (entry) {
+        sdsfree(newpath);
+        fi->fh = MAKE_CACHE_PTR(entry);
+        pthread_mutex_unlock(&remfs_mutex);
+        return 0;
+      }
+      sdsfree(newpath);
       pthread_mutex_unlock(&remfs_mutex);
       return -ENOENT;
     }
-    fi->fh = MAKE_CACHE_PTR(entry);
-    pthread_mutex_unlock(&remfs_mutex);
-    return 0;
   } else if (ref && (flags & IS_PNG) && enable_png) {
     cache_entry *entry =
         generate_fake_ext(ref, newpath, flags & IS_ANNOT_PAGE, "png");
@@ -708,6 +1191,12 @@ static int remfuse_truncate(const char *path, off_t size) {
   if (!enable_mutable)
     return -EROFS;
 
+  size_t len = strlen(path);
+  if (is_path_virtual(path) ||
+      (len >= 14 && strcmp(path + len - 14, ".annotated.pdf") == 0)) {
+    return -EROFS;
+  }
+
   pthread_mutex_lock(&remfs_mutex);
   struct fuse_context *fuse_ctx = fuse_get_context();
   remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
@@ -733,6 +1222,10 @@ static int remfuse_truncate(const char *path, off_t size) {
 static int remfuse_mkdir(const char *path, mode_t mode) {
   if (!enable_mutable)
     return -EROFS;
+
+  if (is_path_virtual(path)) {
+    return -EROFS;
+  }
 
   pthread_mutex_lock(&remfs_mutex);
   struct fuse_context *fuse_ctx = fuse_get_context();
@@ -829,6 +1322,10 @@ static int remfuse_rmdir(const char *path) {
   if (!enable_mutable)
     return -EROFS;
 
+  if (is_path_virtual(path)) {
+    return -EROFS;
+  }
+
   pthread_mutex_lock(&remfs_mutex);
   struct fuse_context *fuse_ctx = fuse_get_context();
   remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
@@ -876,6 +1373,12 @@ static int remfuse_rmdir(const char *path) {
 static int remfuse_unlink(const char *path) {
   if (!enable_mutable)
     return -EROFS;
+
+  size_t len = strlen(path);
+  if (is_path_virtual(path) ||
+      (len >= 14 && strcmp(path + len - 14, ".annotated.pdf") == 0)) {
+    return -EROFS;
+  }
 
   pthread_mutex_lock(&remfs_mutex);
   struct fuse_context *fuse_ctx = fuse_get_context();
@@ -1002,6 +1505,10 @@ static int remfuse_create(const char *path, mode_t mode,
                           struct fuse_file_info *fi) {
   if (!enable_mutable)
     return -EROFS;
+
+  if (is_path_virtual(path)) {
+    return -EROFS;
+  }
 
   pthread_mutex_lock(&remfs_mutex);
   struct fuse_context *fuse_ctx = fuse_get_context();
