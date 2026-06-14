@@ -56,9 +56,5 @@ You can also use the standalone `remfmt` binary to convert individual `.rm` file
 ```
 
 ### TODO
- - Delete support
- - PDF/EPUB/`.rm` imports
  - Typed text input parsing and rendering (v6 scene graph)
 
-### Architecture & Performance TODOs
- - Build a live-sync watcher (`inotify`/`kqueue`) to update the filesystem map without remounting

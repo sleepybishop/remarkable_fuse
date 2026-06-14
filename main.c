@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "cJSON.h"
@@ -140,6 +141,8 @@ static void release_cached_entry(cache_entry *entry) {
 static bool enable_svg = true;
 static bool enable_png = true;
 static bool enable_pdf = true;
+static bool enable_mutable = false;
+static bool enable_standalone_annotations = true;
 static char *template_dir = NULL;
 
 static char *data_dir = NULL;
@@ -229,17 +232,28 @@ static void load_config(const char *path) {
         enable_pdf = cJSON_IsTrue(pdf_item);
     }
 
+    cJSON *mutable_item = cJSON_GetObjectItem(root, "mutable");
+    if (!mutable_item)
+      mutable_item = cJSON_GetObjectItem(root, "mutability");
+    if (cJSON_IsBool(mutable_item))
+      enable_mutable = cJSON_IsTrue(mutable_item);
+
+    cJSON *standalone_item =
+        cJSON_GetObjectItem(root, "standalone_annotations");
+    if (cJSON_IsBool(standalone_item))
+      enable_standalone_annotations = cJSON_IsTrue(standalone_item);
+
     cJSON_Delete(root);
   }
 }
 
 static sds munge_path(const char *path, int *flags) {
   sds ret = sdsnew(path);
-
   size_t len = sdslen(ret);
   bool is_svg = false;
   bool is_png = false;
   bool is_pdf = false;
+
   if (len >= 4 && strcmp(ret + len - 4, ".svg") == 0) {
     ret[len - 4] = '\0';
     is_svg = true;
@@ -249,23 +263,29 @@ static sds munge_path(const char *path, int *flags) {
   } else if (len >= 4 && strcmp(ret + len - 4, ".pdf") == 0) {
     ret[len - 4] = '\0';
     is_pdf = true;
+  } else if (len >= 5 && strcmp(ret + len - 5, ".epub") == 0) {
+    ret[len - 5] = '\0';
+  } else if (len >= 3 && strcmp(ret + len - 3, ".rm") == 0) {
+    ret[len - 3] = '\0';
   }
 
   char *annot_ext = strstr(ret, " Annotations");
   bool is_annot_dir = false;
   bool is_annot_page = false;
-  while (annot_ext) {
-    if (annot_ext[12] == '\0' || annot_ext[12] == '/') {
-      is_annot_page = true;
-      if (annot_ext[12] == '\0') {
-        is_annot_dir = true;
-        annot_ext[0] = '\0';
-      } else {
-        memmove(annot_ext, annot_ext + 12, strlen(annot_ext + 12) + 1);
+  if (enable_standalone_annotations) {
+    while (annot_ext) {
+      if (annot_ext[12] == '\0' || annot_ext[12] == '/') {
+        is_annot_page = true;
+        if (annot_ext[12] == '\0') {
+          is_annot_dir = true;
+          annot_ext[0] = '\0';
+        } else {
+          memmove(annot_ext, annot_ext + 12, strlen(annot_ext + 12) + 1);
+        }
+        break;
       }
-      break;
+      annot_ext = strstr(annot_ext + 1, " Annotations");
     }
-    annot_ext = strstr(annot_ext + 1, " Annotations");
   }
 
   sdsupdatelen(ret);
@@ -314,11 +334,64 @@ static uuid_map_node *rewrite_path(remfs_ctx *ctx, const char *path, int *flags,
   return ref;
 }
 
+static pthread_mutex_t remfs_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void gen_uuid(char *buf) {
+  FILE *f = fopen("/proc/sys/kernel/random/uuid", "r");
+  if (f) {
+    if (fgets(buf, 37, f)) {
+      buf[36] = '\0';
+    }
+    fclose(f);
+  } else {
+    static unsigned int seed = 12345;
+    sprintf(buf, "%08x-%04x-%04x-%04x-%012x", rand_r(&seed),
+            rand_r(&seed) & 0xFFFF, rand_r(&seed) & 0xFFFF,
+            rand_r(&seed) & 0xFFFF, rand_r(&seed));
+  }
+}
+
+static void get_parent_and_name(const char *path, sds *parent_path, sds *name) {
+  const char *last_slash = strrchr(path, '/');
+  if (!last_slash) {
+    *parent_path = sdsnew("/");
+    *name = sdsnew(path);
+  } else if (last_slash == path) {
+    *parent_path = sdsnew("/");
+    *name = sdsnew(path + 1);
+  } else {
+    *parent_path = sdsnewlen(path, last_slash - path);
+    *name = sdsnew(last_slash + 1);
+  }
+}
+
+static uint8_t *slurp(const char *path) {
+  uint8_t *ret = NULL;
+  FILE *f = fopen(path, "rb");
+  if (!f)
+    return ret;
+  size_t meta_size = 0;
+  fseek(f, 0, SEEK_END);
+  meta_size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (meta_size <= 0)
+    goto cleanup;
+  ret = malloc(meta_size + 1);
+  if (!ret)
+    goto cleanup;
+  size_t bytes_read = fread(ret, 1, meta_size, f);
+  ret[bytes_read] = '\0';
+cleanup:
+  fclose(f);
+  return ret;
+}
+
 static int remfuse_getattr(const char *path, struct stat *stbuf) {
   int ret = -ENOENT;
   struct fuse_context *fuse_ctx = fuse_get_context();
   remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
   memset(stbuf, 0, sizeof(struct stat));
+  pthread_mutex_lock(&remfs_mutex);
   if (strcmp(path, "/") == 0) {
     ret = stat(ctx->src_dir, stbuf);
   } else {
@@ -359,9 +432,14 @@ static int remfuse_getattr(const char *path, struct stat *stbuf) {
     sdsfree(newpath);
   }
   if (ret == 0) {
-    stbuf->st_mode &= ~0200;
+    if (enable_mutable) {
+      stbuf->st_mode |= 0200;
+    } else {
+      stbuf->st_mode &= ~0200;
+    }
     stbuf->st_mode |= 0400;
   }
+  pthread_mutex_unlock(&remfs_mutex);
   return ret;
 }
 
@@ -412,6 +490,7 @@ static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
   struct fuse_context *fuse_ctx = fuse_get_context();
   remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
 
+  pthread_mutex_lock(&remfs_mutex);
   children_vec *n = NULL;
   int flags = 0;
   if (strcmp(path, "/") == 0) {
@@ -422,8 +501,10 @@ static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
       n = &ref->children;
   }
 
-  if (!n)
+  if (!n) {
+    pthread_mutex_unlock(&remfs_mutex);
     return -ENOENT;
+  }
 
   filler(buf, ".", NULL, 0);
   filler(buf, "..", NULL, 0);
@@ -444,13 +525,21 @@ static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
         fill_fake_ext(buf, filler, s->file, ".png");
       if (enable_pdf)
         fill_fake_ext(buf, filler, s->file, ".pdf");
+      if (enable_mutable)
+        fill_fake_ext(buf, filler, s->file, ".rm");
     } else if (s->file->filetype == PDF || s->file->filetype == EPUB) {
-      fill_fake_folder(buf, filler, s->file);
-      filler(buf, s->file->visible_name, NULL, 0);
+      if (enable_standalone_annotations) {
+        fill_fake_folder(buf, filler, s->file);
+      }
+      sds tmp = sdsnew(s->file->visible_name);
+      tmp = sdscat(tmp, s->file->filetype == PDF ? ".pdf" : ".epub");
+      filler(buf, tmp, NULL, 0);
+      sdsfree(tmp);
     } else {
       filler(buf, s->file->visible_name, NULL, 0);
     }
   }
+  pthread_mutex_unlock(&remfs_mutex);
   return 0;
 }
 
@@ -498,6 +587,11 @@ static cache_entry *generate_fake_ext(uuid_map_node *ref, const char *rmpath,
 static int remfuse_open(const char *path, struct fuse_file_info *fi) {
   struct fuse_context *fuse_ctx = fuse_get_context();
   remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
+
+  if ((fi->flags & (O_WRONLY | O_RDWR)) && !enable_mutable)
+    return -EROFS;
+
+  pthread_mutex_lock(&remfs_mutex);
   int flags = 0;
   sds newpath = sdsempty();
   uuid_map_node *ref = rewrite_path(ctx, path, &flags, &newpath);
@@ -512,6 +606,7 @@ static int remfuse_open(const char *path, struct fuse_file_info *fi) {
       allowed = true;
     if (!allowed) {
       sdsfree(newpath);
+      pthread_mutex_unlock(&remfs_mutex);
       return -ENOENT;
     }
   }
@@ -520,36 +615,49 @@ static int remfuse_open(const char *path, struct fuse_file_info *fi) {
     cache_entry *entry =
         generate_fake_ext(ref, newpath, flags & IS_ANNOT_PAGE, "svg");
     sdsfree(newpath);
-    if (!entry)
+    if (!entry) {
+      pthread_mutex_unlock(&remfs_mutex);
       return -ENOENT;
+    }
     fi->fh = MAKE_CACHE_PTR(entry);
+    pthread_mutex_unlock(&remfs_mutex);
     return 0;
   } else if (ref && (flags & IS_PDF) && enable_pdf) {
     cache_entry *entry =
         generate_fake_ext(ref, newpath, flags & IS_ANNOT_PAGE, "pdf");
     sdsfree(newpath);
-    if (!entry)
+    if (!entry) {
+      pthread_mutex_unlock(&remfs_mutex);
       return -ENOENT;
+    }
     fi->fh = MAKE_CACHE_PTR(entry);
+    pthread_mutex_unlock(&remfs_mutex);
     return 0;
   } else if (ref && (flags & IS_PNG) && enable_png) {
     cache_entry *entry =
         generate_fake_ext(ref, newpath, flags & IS_ANNOT_PAGE, "png");
     sdsfree(newpath);
-    if (!entry)
+    if (!entry) {
+      pthread_mutex_unlock(&remfs_mutex);
       return -ENOENT;
+    }
     fi->fh = MAKE_CACHE_PTR(entry);
+    pthread_mutex_unlock(&remfs_mutex);
     return 0;
   } else {
     if (sdslen(newpath) == 0) {
       sdsfree(newpath);
+      pthread_mutex_unlock(&remfs_mutex);
       return -1;
     }
     int fd = open(newpath, fi->flags);
     sdsfree(newpath);
-    if (fd == -1)
+    if (fd == -1) {
+      pthread_mutex_unlock(&remfs_mutex);
       return -errno;
+    }
     fi->fh = fd;
+    pthread_mutex_unlock(&remfs_mutex);
     return 0;
   }
 }
@@ -581,10 +689,512 @@ static int remfuse_read(const char *path, char *buf, size_t size, off_t offset,
   }
 }
 
+static int remfuse_write(const char *path, const char *buf, size_t size,
+                         off_t offset, struct fuse_file_info *fi) {
+  if (!enable_mutable)
+    return -EROFS;
+
+  if (IS_CACHE_PTR(fi->fh)) {
+    return -EROFS;
+  }
+
+  int ret = pwrite(fi->fh, buf, size, offset);
+  if (ret == -1)
+    return -errno;
+  return ret;
+}
+
+static int remfuse_truncate(const char *path, off_t size) {
+  if (!enable_mutable)
+    return -EROFS;
+
+  pthread_mutex_lock(&remfs_mutex);
+  struct fuse_context *fuse_ctx = fuse_get_context();
+  remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
+
+  int flags = 0;
+  sds newpath = sdsempty();
+  rewrite_path(ctx, path, &flags, &newpath);
+  if (sdslen(newpath) == 0) {
+    sdsfree(newpath);
+    pthread_mutex_unlock(&remfs_mutex);
+    return -ENOENT;
+  }
+
+  int ret = truncate(newpath, size);
+  sdsfree(newpath);
+  pthread_mutex_unlock(&remfs_mutex);
+
+  if (ret == -1)
+    return -errno;
+  return 0;
+}
+
+static int remfuse_mkdir(const char *path, mode_t mode) {
+  if (!enable_mutable)
+    return -EROFS;
+
+  pthread_mutex_lock(&remfs_mutex);
+  struct fuse_context *fuse_ctx = fuse_get_context();
+  remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
+
+  sds parent_path = sdsempty();
+  sds name = sdsempty();
+  get_parent_and_name(path, &parent_path, &name);
+
+  uuid_map_node *parent_node = NULL;
+  if (strcmp(parent_path, "/") != 0) {
+    parent_node = remfs_path_search(ctx, parent_path);
+    if (!parent_node || parent_node->file->type != COLLECTION) {
+      sdsfree(parent_path);
+      sdsfree(name);
+      pthread_mutex_unlock(&remfs_mutex);
+      return -ENOENT;
+    }
+  }
+
+  bool is_notebook = false;
+  size_t name_len = sdslen(name);
+  if (name_len >= 9 && strcmp(name + name_len - 9, ".notebook") == 0) {
+    is_notebook = true;
+  }
+
+  char uuid[64];
+  gen_uuid(uuid);
+
+  cJSON *meta = cJSON_CreateObject();
+  cJSON_AddBoolToObject(meta, "deleted", false);
+  char last_mod[32];
+  sprintf(last_mod, "%llu", (unsigned long long)time(NULL) * 1000);
+  cJSON_AddStringToObject(meta, "lastModified", last_mod);
+  cJSON_AddStringToObject(meta, "parent",
+                          parent_node ? parent_node->file->uuid : "");
+  cJSON_AddBoolToObject(meta, "pinned", false);
+  cJSON_AddStringToObject(meta, "type",
+                          is_notebook ? "DocumentType" : "CollectionType");
+  cJSON_AddStringToObject(meta, "visibleName", name);
+
+  sds meta_path =
+      sdscatprintf(sdsempty(), "%s/%s.metadata", ctx->src_dir, uuid);
+  FILE *f = fopen(meta_path, "w");
+  if (f) {
+    char *str = cJSON_Print(meta);
+    fputs(str, f);
+    free(str);
+    fclose(f);
+  }
+  sdsfree(meta_path);
+  cJSON_Delete(meta);
+
+  if (is_notebook) {
+    cJSON *content = cJSON_CreateObject();
+    cJSON_AddObjectToObject(content, "extraMetadata");
+    cJSON_AddStringToObject(content, "fileType", "notebook");
+    cJSON_AddStringToObject(content, "orientation", "portrait");
+    cJSON_AddArrayToObject(content, "pages");
+
+    sds content_path =
+        sdscatprintf(sdsempty(), "%s/%s.content", ctx->src_dir, uuid);
+    FILE *f_c = fopen(content_path, "w");
+    if (f_c) {
+      char *str = cJSON_Print(content);
+      fputs(str, f_c);
+      free(str);
+      fclose(f_c);
+    }
+    sdsfree(content_path);
+    cJSON_Delete(content);
+
+    sds pagedata_path =
+        sdscatprintf(sdsempty(), "%s/%s.pagedata", ctx->src_dir, uuid);
+    FILE *f_p = fopen(pagedata_path, "w");
+    if (f_p)
+      fclose(f_p);
+    sdsfree(pagedata_path);
+
+    sds dir_path = sdscatprintf(sdsempty(), "%s/%s", ctx->src_dir, uuid);
+    mkdir(dir_path, 0755);
+    sdsfree(dir_path);
+  }
+
+  sdsfree(parent_path);
+  sdsfree(name);
+  pthread_mutex_unlock(&remfs_mutex);
+
+  remfs_reload(ctx);
+  return 0;
+}
+
+static int remfuse_rmdir(const char *path) {
+  if (!enable_mutable)
+    return -EROFS;
+
+  pthread_mutex_lock(&remfs_mutex);
+  struct fuse_context *fuse_ctx = fuse_get_context();
+  remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
+
+  int flags = 0;
+  sds newpath = sdsempty();
+  uuid_map_node *ref = rewrite_path(ctx, path, &flags, &newpath);
+  sdsfree(newpath);
+
+  if (!ref || ref->file->type != COLLECTION) {
+    pthread_mutex_unlock(&remfs_mutex);
+    return -ENOENT;
+  }
+
+  sds meta_path =
+      sdscatprintf(sdsempty(), "%s/%s.metadata", ctx->src_dir, ref->file->uuid);
+  uint8_t *raw_meta = slurp(meta_path);
+  if (raw_meta) {
+    cJSON *json = cJSON_Parse((const char *)raw_meta);
+    if (json) {
+      cJSON *del_item = cJSON_GetObjectItem(json, "deleted");
+      if (del_item) {
+        cJSON_ReplaceItemInObject(json, "deleted", cJSON_CreateBool(true));
+      } else {
+        cJSON_AddBoolToObject(json, "deleted", true);
+      }
+      char *str = cJSON_Print(json);
+      FILE *f_m = fopen(meta_path, "w");
+      if (f_m) {
+        fputs(str, f_m);
+        fclose(f_m);
+      }
+      free(str);
+      cJSON_Delete(json);
+    }
+    free(raw_meta);
+  }
+  sdsfree(meta_path);
+  pthread_mutex_unlock(&remfs_mutex);
+
+  remfs_reload(ctx);
+  return 0;
+}
+
+static int remfuse_unlink(const char *path) {
+  if (!enable_mutable)
+    return -EROFS;
+
+  pthread_mutex_lock(&remfs_mutex);
+  struct fuse_context *fuse_ctx = fuse_get_context();
+  remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
+
+  int flags = 0;
+  sds newpath = sdsempty();
+  uuid_map_node *ref = rewrite_path(ctx, path, &flags, &newpath);
+  sdsfree(newpath);
+
+  if (!ref) {
+    pthread_mutex_unlock(&remfs_mutex);
+    return -ENOENT;
+  }
+
+  if (ref->file->filetype == PAGE) {
+    uuid_map_node *notebook_node = remfs_uuid_search(ctx, ref->file->parent);
+    if (notebook_node) {
+      sds content_path = sdscatprintf(sdsempty(), "%s/%s.content", ctx->src_dir,
+                                      notebook_node->file->uuid);
+      uint8_t *raw_content = slurp(content_path);
+      if (raw_content) {
+        cJSON *json = cJSON_Parse((const char *)raw_content);
+        if (json) {
+          cJSON *pages = cJSON_GetObjectItem(json, "pages");
+          if (!pages) {
+            cJSON *cPages = cJSON_GetObjectItem(json, "cPages");
+            if (cPages) {
+              pages = cJSON_GetObjectItem(cPages, "pages");
+            }
+          }
+          if (pages && cJSON_IsArray(pages)) {
+            int idx = -1;
+            for (int i = 0; i < cJSON_GetArraySize(pages); i++) {
+              cJSON *item = cJSON_GetArrayItem(pages, i);
+              if (cJSON_IsString(item) &&
+                  strcmp(item->valuestring, ref->file->uuid) == 0) {
+                idx = i;
+                break;
+              }
+            }
+            if (idx != -1) {
+              cJSON_DeleteItemFromArray(pages, idx);
+              char *str = cJSON_Print(json);
+              FILE *f_c = fopen(content_path, "w");
+              if (f_c) {
+                fputs(str, f_c);
+                fclose(f_c);
+              }
+              free(str);
+
+              sds pagedata_path =
+                  sdscatprintf(sdsempty(), "%s/%s.pagedata", ctx->src_dir,
+                               notebook_node->file->uuid);
+              FILE *f_p = fopen(pagedata_path, "r");
+              if (f_p) {
+                kvec_t(sds) lines = {0};
+                char buf[RM_PATH_MAX];
+                while (fgets(buf, sizeof(buf), f_p)) {
+                  size_t len = strlen(buf);
+                  while (len > 0 &&
+                         (buf[len - 1] == '\n' || buf[len - 1] == '\r')) {
+                    buf[len - 1] = '\0';
+                    len--;
+                  }
+                  kv_push(sds, lines, sdsnew(buf));
+                }
+                fclose(f_p);
+
+                f_p = fopen(pagedata_path, "w");
+                if (f_p) {
+                  for (int i = 0; i < kv_size(lines); i++) {
+                    if (i != idx) {
+                      fprintf(f_p, "%s\n", kv_A(lines, i));
+                    }
+                    sdsfree(kv_A(lines, i));
+                  }
+                  fclose(f_p);
+                }
+                kv_destroy(lines);
+              }
+              sdsfree(pagedata_path);
+            }
+          }
+          cJSON_Delete(json);
+        }
+        free(raw_content);
+      }
+      sdsfree(content_path);
+    }
+  } else {
+    sds meta_path = sdscatprintf(sdsempty(), "%s/%s.metadata", ctx->src_dir,
+                                 ref->file->uuid);
+    uint8_t *raw_meta = slurp(meta_path);
+    if (raw_meta) {
+      cJSON *json = cJSON_Parse((const char *)raw_meta);
+      if (json) {
+        cJSON *del_item = cJSON_GetObjectItem(json, "deleted");
+        if (del_item) {
+          cJSON_ReplaceItemInObject(json, "deleted", cJSON_CreateBool(true));
+        } else {
+          cJSON_AddBoolToObject(json, "deleted", true);
+        }
+        char *str = cJSON_Print(json);
+        FILE *f_m = fopen(meta_path, "w");
+        if (f_m) {
+          fputs(str, f_m);
+          fclose(f_m);
+        }
+        free(str);
+        cJSON_Delete(json);
+      }
+      free(raw_meta);
+    }
+    sdsfree(meta_path);
+  }
+  pthread_mutex_unlock(&remfs_mutex);
+
+  remfs_reload(ctx);
+  return 0;
+}
+
+static int remfuse_create(const char *path, mode_t mode,
+                          struct fuse_file_info *fi) {
+  if (!enable_mutable)
+    return -EROFS;
+
+  pthread_mutex_lock(&remfs_mutex);
+  struct fuse_context *fuse_ctx = fuse_get_context();
+  remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
+  sds parent_path = sdsempty();
+  sds name = sdsempty();
+  get_parent_and_name(path, &parent_path, &name);
+
+  uuid_map_node *parent_node = NULL;
+  if (strcmp(parent_path, "/") != 0) {
+    parent_node = remfs_path_search(ctx, parent_path);
+  }
+
+  size_t name_len = sdslen(name);
+  bool is_pdf = (name_len >= 4 && strcmp(name + name_len - 4, ".pdf") == 0);
+  bool is_epub = (name_len >= 5 && strcmp(name + name_len - 5, ".epub") == 0);
+  bool is_rm = (name_len >= 3 && strcmp(name + name_len - 3, ".rm") == 0);
+
+  if (is_rm) {
+    if (!parent_node || parent_node->file->type != DOCUMENT ||
+        parent_node->file->filetype != NOTEBOOK) {
+      sdsfree(parent_path);
+      sdsfree(name);
+      pthread_mutex_unlock(&remfs_mutex);
+      return -ENOENT;
+    }
+
+    char page_uuid[64];
+    gen_uuid(page_uuid);
+
+    sds page_path = sdscatprintf(sdsempty(), "%s/%s/%s.rm", ctx->src_dir,
+                                 parent_node->file->uuid, page_uuid);
+    FILE *f_rm = fopen(page_path, "wb");
+    if (!f_rm) {
+      sdsfree(page_path);
+      sdsfree(parent_path);
+      sdsfree(name);
+      pthread_mutex_unlock(&remfs_mutex);
+      return -EIO;
+    }
+    fwrite("reMarkable .lines file, version=6          ", 1, 43, f_rm);
+    fclose(f_rm);
+
+    sds content_path = sdscatprintf(sdsempty(), "%s/%s.content", ctx->src_dir,
+                                    parent_node->file->uuid);
+    uint8_t *raw_content = slurp(content_path);
+    if (raw_content) {
+      cJSON *json = cJSON_Parse((const char *)raw_content);
+      if (json) {
+        cJSON *pages = cJSON_GetObjectItem(json, "pages");
+        if (!pages) {
+          cJSON *cPages = cJSON_GetObjectItem(json, "cPages");
+          if (cPages) {
+            pages = cJSON_GetObjectItem(cPages, "pages");
+          }
+        }
+        if (pages && cJSON_IsArray(pages)) {
+          cJSON_AddItemToArray(pages, cJSON_CreateString(page_uuid));
+          char *str = cJSON_Print(json);
+          FILE *f_c = fopen(content_path, "w");
+          if (f_c) {
+            fputs(str, f_c);
+            fclose(f_c);
+          }
+          free(str);
+        }
+        cJSON_Delete(json);
+      }
+      free(raw_content);
+    }
+    sdsfree(content_path);
+
+    sds pagedata_path = sdscatprintf(sdsempty(), "%s/%s.pagedata", ctx->src_dir,
+                                     parent_node->file->uuid);
+    FILE *f_p = fopen(pagedata_path, "a");
+    if (f_p) {
+      fputs("Blank\n", f_p);
+      fclose(f_p);
+    }
+    sdsfree(pagedata_path);
+
+    sdsfree(parent_path);
+    sdsfree(name);
+
+    int fd = open(page_path, fi->flags, mode);
+    sdsfree(page_path);
+    if (fd == -1) {
+      pthread_mutex_unlock(&remfs_mutex);
+      return -errno;
+    }
+    fi->fh = fd;
+    pthread_mutex_unlock(&remfs_mutex);
+
+    remfs_reload(ctx);
+    return 0;
+  } else if (is_pdf || is_epub) {
+    if (parent_node && parent_node->file->type != COLLECTION) {
+      sdsfree(parent_path);
+      sdsfree(name);
+      pthread_mutex_unlock(&remfs_mutex);
+      return -ENOTDIR;
+    }
+
+    char doc_uuid[64];
+    gen_uuid(doc_uuid);
+
+    sds vis_name = sdsnew(name);
+    if (is_pdf) {
+      vis_name[sdslen(vis_name) - 4] = '\0';
+    } else {
+      vis_name[sdslen(vis_name) - 5] = '\0';
+    }
+    sdsupdatelen(vis_name);
+
+    cJSON *meta = cJSON_CreateObject();
+    cJSON_AddBoolToObject(meta, "deleted", false);
+    char last_mod[32];
+    sprintf(last_mod, "%llu", (unsigned long long)time(NULL) * 1000);
+    cJSON_AddStringToObject(meta, "lastModified", last_mod);
+    cJSON_AddStringToObject(meta, "parent",
+                            parent_node ? parent_node->file->uuid : "");
+    cJSON_AddBoolToObject(meta, "pinned", false);
+    cJSON_AddStringToObject(meta, "type", "DocumentType");
+    cJSON_AddStringToObject(meta, "visibleName", vis_name);
+    sdsfree(vis_name);
+
+    sds meta_path =
+        sdscatprintf(sdsempty(), "%s/%s.metadata", ctx->src_dir, doc_uuid);
+    FILE *f_m = fopen(meta_path, "w");
+    if (f_m) {
+      char *str = cJSON_Print(meta);
+      fputs(str, f_m);
+      free(str);
+      fclose(f_m);
+    }
+    sdsfree(meta_path);
+    cJSON_Delete(meta);
+
+    cJSON *content = cJSON_CreateObject();
+    cJSON_AddObjectToObject(content, "extraMetadata");
+    cJSON_AddStringToObject(content, "fileType", is_pdf ? "pdf" : "epub");
+    cJSON_AddArrayToObject(content, "pages");
+
+    sds content_path =
+        sdscatprintf(sdsempty(), "%s/%s.content", ctx->src_dir, doc_uuid);
+    FILE *f_c = fopen(content_path, "w");
+    if (f_c) {
+      char *str = cJSON_Print(content);
+      fputs(str, f_c);
+      free(str);
+      fclose(f_c);
+    }
+    sdsfree(content_path);
+    cJSON_Delete(content);
+
+    sds pagedata_path =
+        sdscatprintf(sdsempty(), "%s/%s.pagedata", ctx->src_dir, doc_uuid);
+    FILE *f_p = fopen(pagedata_path, "w");
+    if (f_p)
+      fclose(f_p);
+    sdsfree(pagedata_path);
+
+    sds doc_path = sdscatprintf(sdsempty(), "%s/%s%s", ctx->src_dir, doc_uuid,
+                                is_pdf ? ".pdf" : ".epub");
+    int fd = open(doc_path, fi->flags, mode);
+    sdsfree(doc_path);
+
+    sdsfree(parent_path);
+    sdsfree(name);
+
+    if (fd == -1) {
+      pthread_mutex_unlock(&remfs_mutex);
+      return -errno;
+    }
+    fi->fh = fd;
+    pthread_mutex_unlock(&remfs_mutex);
+
+    remfs_reload(ctx);
+    return 0;
+  } else {
+    sdsfree(parent_path);
+    sdsfree(name);
+    pthread_mutex_unlock(&remfs_mutex);
+    return -EINVAL;
+  }
+}
+
+static int remfuse_utimens(const char *path, const struct timespec tv[2]) {
+  return 0;
+}
 static void *remfuse_init(struct fuse_conn_info *conn) {
   const char *src = data_dir ? data_dir : DEFAULT_SOURCE;
   remfs_ctx *ctx = remfs_init(src);
-  // remfs_print(ctx, stderr);
   return ctx;
 }
 
@@ -599,6 +1209,13 @@ static struct fuse_operations remfuse_ops = {
     .open = remfuse_open,
     .release = remfuse_release,
     .read = remfuse_read,
+    .write = remfuse_write,
+    .truncate = remfuse_truncate,
+    .mkdir = remfuse_mkdir,
+    .rmdir = remfuse_rmdir,
+    .unlink = remfuse_unlink,
+    .create = remfuse_create,
+    .utimens = remfuse_utimens,
     .init = remfuse_init,
     .destroy = remfuse_destroy,
 };

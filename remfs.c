@@ -363,3 +363,55 @@ int remfs_list(const char *path, remfs_file_vec *fv) {
   globfree(&globbuf);
   return 0;
 }
+
+void remfs_reload(remfs_ctx *ctx) {
+  empty_maps(ctx);
+  kv_destroy(ctx->fv);
+  kv_destroy(ctx->root_children);
+
+  memset(&ctx->fv, 0, sizeof(ctx->fv));
+  memset(&ctx->root_children, 0, sizeof(ctx->root_children));
+  RB_INIT(ctx->fwd_map);
+  RB_INIT(ctx->rev_map);
+
+  sds tmp = sdsempty();
+  struct stat stbuf;
+  remfs_list(ctx->src_dir, &ctx->fv);
+
+  for (int i = 0; i < kv_size(ctx->fv); i++) {
+    remfs_file *file = &kv_A(ctx->fv, i);
+    if (file->deleted)
+      continue;
+    sdsclear(tmp);
+    if (file->filetype == PAGE) {
+      tmp = sdscatprintf(tmp, "%s/%s/%s.rm", ctx->src_dir, file->parent,
+                         file->uuid);
+    } else {
+      tmp = sdscatprintf(tmp, "%s/%s.metadata", ctx->src_dir, file->uuid);
+    }
+    if (stat(tmp, &stbuf) == -1)
+      continue;
+    uuid_map_node *s = calloc(1, sizeof(uuid_map_node));
+    s->file = file;
+    if (RB_INSERT(uuid_fwd_map, ctx->fwd_map, s) != NULL) {
+      free(s);
+    }
+  }
+
+  for (int i = 0; i < kv_size(ctx->fv); i++) {
+    remfs_file *file = &kv_A(ctx->fv, i);
+    uuid_map_node *s = remfs_uuid_search(ctx, file->uuid);
+    if (s == NULL)
+      continue;
+    if (s->path == NULL) {
+      s->path = gen_path(ctx, i);
+      if (RB_INSERT(uuid_rev_map, ctx->rev_map, s) != NULL) {
+        sdsfree(s->path);
+        s->path = NULL;
+      } else {
+        add_member(ctx, s);
+      }
+    }
+  }
+  sdsfree(tmp);
+}

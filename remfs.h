@@ -66,5 +66,6 @@ uuid_map_node *remfs_path_search(remfs_ctx *ctx, const char *path);
 uuid_map_node *remfs_uuid_search(remfs_ctx *ctx, const char *uuid);
 void remfs_destroy(remfs_ctx *arg);
 void remfs_print(remfs_ctx *arg, FILE *stream);
+void remfs_reload(remfs_ctx *ctx);
 
 #endif

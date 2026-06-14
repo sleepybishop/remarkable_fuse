@@ -110,8 +110,8 @@ typedef struct {
 
 static const char rmv_magic[] = "reMarkable .lines file, version=%d          ";
 
-static uint32_t svg_color[] = {0x000000, 0x7d7d7d, 0xffffff, 0xebcb8b, 0xfe93bf,
-                               0xa2f567, 0x000088, 0x880000, 0x0d0d0d, 0xffed75,
+static uint32_t svg_color[] = {0x000000, 0x7d7d7d, 0xffffff, 0xebcb8b, 0xa2f567,
+                               0xfe93bf, 0x000088, 0x880000, 0x0d0d0d, 0xffed75,
                                0xa1d87d, 0x8bd0e5, 0xb782cd, 0xf7e851};
 
 static const char *svg_tpl[] = {
@@ -164,7 +164,6 @@ static void set_pen_attr(remfmt_stroke *st) {
     st->calc_width = 0.4 * pow(st->calc_width, 4);
     break;
   case HIGHLIGHTER:
-    st->color = YELLOWHL;
   case HIGHLIGHTER_V2:
     st->opacity = 0.25;
     st->square_cap = true;
@@ -515,8 +514,9 @@ static void write_png_to_stream(FILE *stream, canvas_pixel *canvas, int width,
   free(u_buf);
 }
 
-static void draw_circle(canvas_pixel *canvas, int width, int height, float x,
-                        float y, float r, uint32_t stroke_color, float alpha) {
+static void draw_circle(canvas_pixel *canvas, uint8_t *mask, int width,
+                        int height, float x, float y, float r,
+                        uint32_t stroke_color, float alpha) {
   float min_x = x - r - 1.0f;
   float max_x = x + r + 1.0f;
   float min_y = y - r - 1.0f;
@@ -535,9 +535,12 @@ static void draw_circle(canvas_pixel *canvas, int width, int height, float x,
   if (end_y >= height)
     end_y = height - 1;
 
-  uint8_t src_r = (uint8_t)((stroke_color >> 16) & 0xff);
-  uint8_t src_g = (uint8_t)((stroke_color >> 8) & 0xff);
-  uint8_t src_b = (uint8_t)(stroke_color & 0xff);
+  uint8_t src_r = 0, src_g = 0, src_b = 0;
+  if (mask == NULL) {
+    src_r = (uint8_t)((stroke_color >> 16) & 0xff);
+    src_g = (uint8_t)((stroke_color >> 8) & 0xff);
+    src_b = (uint8_t)(stroke_color & 0xff);
+  }
 
   for (int py = start_y; py <= end_y; py++) {
     for (int px = start_x; px <= end_x; px++) {
@@ -559,25 +562,32 @@ static void draw_circle(canvas_pixel *canvas, int width, int height, float x,
         coverage = r + 0.5f - dist;
       }
 
-      float final_alpha = alpha * coverage;
-      if (final_alpha > 0.001f) {
+      if (coverage > 0.001f) {
         int idx = py * width + px;
-        canvas_pixel *pixel = &canvas[idx];
+        if (mask != NULL) {
+          uint8_t coverage_val = (uint8_t)(coverage * 255.0f + 0.5f);
+          if (coverage_val > mask[idx]) {
+            mask[idx] = coverage_val;
+          }
+        } else {
+          float final_alpha = alpha * coverage;
+          canvas_pixel *pixel = &canvas[idx];
 
-        pixel->r = (uint8_t)(src_r * final_alpha +
-                             pixel->r * (1.0f - final_alpha) + 0.5f);
-        pixel->g = (uint8_t)(src_g * final_alpha +
-                             pixel->g * (1.0f - final_alpha) + 0.5f);
-        pixel->b = (uint8_t)(src_b * final_alpha +
-                             pixel->b * (1.0f - final_alpha) + 0.5f);
+          pixel->r = (uint8_t)(src_r * final_alpha +
+                               pixel->r * (1.0f - final_alpha) + 0.5f);
+          pixel->g = (uint8_t)(src_g * final_alpha +
+                               pixel->g * (1.0f - final_alpha) + 0.5f);
+          pixel->b = (uint8_t)(src_b * final_alpha +
+                               pixel->b * (1.0f - final_alpha) + 0.5f);
+        }
       }
     }
   }
 }
 
-static void draw_segment(canvas_pixel *canvas, int width, int height, float x1,
-                         float y1, float x2, float y2, float r,
-                         uint32_t stroke_color, float alpha) {
+static void draw_segment(canvas_pixel *canvas, uint8_t *mask, int width,
+                         int height, float x1, float y1, float x2, float y2,
+                         float r, uint32_t stroke_color, float alpha) {
   float dx = x2 - x1;
   float dy = y2 - y1;
   float l2 = dx * dx + dy * dy;
@@ -600,9 +610,12 @@ static void draw_segment(canvas_pixel *canvas, int width, int height, float x1,
   if (end_y >= height)
     end_y = height - 1;
 
-  uint8_t src_r = (uint8_t)((stroke_color >> 16) & 0xff);
-  uint8_t src_g = (uint8_t)((stroke_color >> 8) & 0xff);
-  uint8_t src_b = (uint8_t)(stroke_color & 0xff);
+  uint8_t src_r = 0, src_g = 0, src_b = 0;
+  if (mask == NULL) {
+    src_r = (uint8_t)((stroke_color >> 16) & 0xff);
+    src_g = (uint8_t)((stroke_color >> 8) & 0xff);
+    src_b = (uint8_t)(stroke_color & 0xff);
+  }
 
   for (int py = start_y; py <= end_y; py++) {
     for (int px = start_x; px <= end_x; px++) {
@@ -635,17 +648,24 @@ static void draw_segment(canvas_pixel *canvas, int width, int height, float x1,
         coverage = r + 0.5f - dist;
       }
 
-      float final_alpha = alpha * coverage;
-      if (final_alpha > 0.001f) {
+      if (coverage > 0.001f) {
         int idx = py * width + px;
-        canvas_pixel *pixel = &canvas[idx];
+        if (mask != NULL) {
+          uint8_t coverage_val = (uint8_t)(coverage * 255.0f + 0.5f);
+          if (coverage_val > mask[idx]) {
+            mask[idx] = coverage_val;
+          }
+        } else {
+          float final_alpha = alpha * coverage;
+          canvas_pixel *pixel = &canvas[idx];
 
-        pixel->r = (uint8_t)(src_r * final_alpha +
-                             pixel->r * (1.0f - final_alpha) + 0.5f);
-        pixel->g = (uint8_t)(src_g * final_alpha +
-                             pixel->g * (1.0f - final_alpha) + 0.5f);
-        pixel->b = (uint8_t)(src_b * final_alpha +
-                             pixel->b * (1.0f - final_alpha) + 0.5f);
+          pixel->r = (uint8_t)(src_r * final_alpha +
+                               pixel->r * (1.0f - final_alpha) + 0.5f);
+          pixel->g = (uint8_t)(src_g * final_alpha +
+                               pixel->g * (1.0f - final_alpha) + 0.5f);
+          pixel->b = (uint8_t)(src_b * final_alpha +
+                               pixel->b * (1.0f - final_alpha) + 0.5f);
+        }
       }
     }
   }
@@ -694,6 +714,8 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
     return;
   }
   memset(canvas, 255, (size_t)width * (size_t)height * sizeof(canvas_pixel));
+
+  uint8_t *mask = malloc((size_t)width * (size_t)height);
 
   if (prm && prm->template_dir && prm->template_name &&
       prm->template_name[0] != '\0') {
@@ -755,6 +777,48 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
 
       float xOffset = (st->version == 6) ? ((float)DEV_W / 2.0f) : 0.0f;
 
+      bool is_hl = (pen_type == 5 || pen_type == 18);
+      int box_min_x = 0, box_max_x = 0, box_min_y = 0, box_max_y = 0;
+      if (is_hl && mask != NULL) {
+        float s_min_x = 1e9f, s_max_x = -1e9f, s_min_y = 1e9f, s_max_y = -1e9f;
+        for (int j = 0; j < num_points; j++) {
+          remfmt_seg sg = kv_A(st->segments, j);
+          float x = sg.x + xOffset - min_x;
+          float y = sg.y - min_y;
+          if (prm && prm->landscape) {
+            float rx = (float)port_h - y;
+            float ry = x;
+            x = rx;
+            y = ry;
+          }
+          float r = sg.width / 2.0f;
+          if (x - r < s_min_x)
+            s_min_x = x - r;
+          if (x + r > s_max_x)
+            s_max_x = x + r;
+          if (y - r < s_min_y)
+            s_min_y = y - r;
+          if (y + r > s_max_y)
+            s_max_y = y + r;
+        }
+        box_min_x = (int)floorf(s_min_x) - 1;
+        if (box_min_x < 0)
+          box_min_x = 0;
+        box_max_x = (int)ceilf(s_max_x) + 1;
+        if (box_max_x >= width)
+          box_max_x = width - 1;
+        box_min_y = (int)floorf(s_min_y) - 1;
+        if (box_min_y < 0)
+          box_min_y = 0;
+        box_max_y = (int)ceilf(s_max_y) + 1;
+        if (box_max_y >= height)
+          box_max_y = height - 1;
+
+        for (int y = box_min_y; y <= box_max_y; y++) {
+          memset(&mask[y * width + box_min_x], 0, box_max_x - box_min_x + 1);
+        }
+      }
+
       if (num_points == 1) {
         remfmt_seg pt = kv_A(st->segments, 0);
         float x = pt.x + xOffset - min_x;
@@ -765,11 +829,17 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
           x = rx;
           y = ry;
         }
-        float r = (pt.width * st->width * bm.width_scale) / 4.0f;
+        float r;
+        if (is_hl) {
+          r = pt.width / 2.0f;
+        } else {
+          r = (pt.width * st->width * bm.width_scale) / 4.0f;
+        }
         if (r < 0.5f)
           r = 0.5f;
 
-        draw_circle(canvas, width, height, x, y, r, stroke_color, bm.alpha);
+        draw_circle(canvas, is_hl ? mask : NULL, width, height, x, y, r,
+                    stroke_color, bm.alpha);
       } else {
         for (int j = 1; j < num_points; j++) {
           remfmt_seg prev = kv_A(st->segments, j - 1);
@@ -791,15 +861,45 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
             y2 = ry2;
           }
 
-          float segWidth = ((prev.width + curr.width) / 2.0f) *
-                           (st->width / 2.0f) * bm.width_scale * 0.5f;
+          float segWidth;
+          if (is_hl) {
+            segWidth = (prev.width + curr.width) / 2.0f;
+          } else {
+            segWidth = ((prev.width + curr.width) / 2.0f) * (st->width / 2.0f) *
+                       bm.width_scale * 0.5f;
+          }
           if (segWidth < 0.4f)
             segWidth = 0.4f;
 
           float r = segWidth / 2.0f;
 
-          draw_segment(canvas, width, height, x1, y1, x2, y2, r, stroke_color,
-                       bm.alpha);
+          draw_segment(canvas, is_hl ? mask : NULL, width, height, x1, y1, x2,
+                       y2, r, stroke_color, bm.alpha);
+        }
+      }
+
+      if (is_hl && mask != NULL) {
+        uint8_t src_r = (uint8_t)((stroke_color >> 16) & 0xff);
+        uint8_t src_g = (uint8_t)((stroke_color >> 8) & 0xff);
+        uint8_t src_b = (uint8_t)(stroke_color & 0xff);
+        float alpha = bm.alpha;
+
+        for (int py = box_min_y; py <= box_max_y; py++) {
+          for (int px = box_min_x; px <= box_max_x; px++) {
+            int idx = py * width + px;
+            if (mask[idx] > 0) {
+              float coverage = mask[idx] / 255.0f;
+              float final_alpha = alpha * coverage;
+              canvas_pixel *pixel = &canvas[idx];
+
+              pixel->r = (uint8_t)(src_r * final_alpha +
+                                   pixel->r * (1.0f - final_alpha) + 0.5f);
+              pixel->g = (uint8_t)(src_g * final_alpha +
+                                   pixel->g * (1.0f - final_alpha) + 0.5f);
+              pixel->b = (uint8_t)(src_b * final_alpha +
+                                   pixel->b * (1.0f - final_alpha) + 0.5f);
+            }
+          }
         }
       }
     }
@@ -807,6 +907,8 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
 
   write_png_to_stream(stream, canvas, width, height);
   free(canvas);
+  if (mask)
+    free(mask);
 }
 
 void remfmt_render_svg(FILE *stream, remfmt_stroke_vec *strokes,
