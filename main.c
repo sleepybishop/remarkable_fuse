@@ -610,6 +610,15 @@ static void usage(const char *progname) {
          "\n");
 }
 
+static char *mountpoint = NULL;
+static int opt_proc(void *data, const char *arg, int key,
+                    struct fuse_args *outargs) {
+  if (key == FUSE_OPT_KEY_NONOPT && mountpoint == NULL) {
+    mountpoint = strdup(arg);
+  }
+  return 1;
+}
+
 int main(int argc, char *argv[]) {
   int ret = 1;
   struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
@@ -617,7 +626,7 @@ int main(int argc, char *argv[]) {
 
   options.config_file = NULL;
 
-  if (fuse_opt_parse(&args, &options, option_spec, NULL) == -1)
+  if (fuse_opt_parse(&args, &options, option_spec, opt_proc) == -1)
     goto cleanup;
 
   if (options.config_file) {
@@ -645,6 +654,19 @@ int main(int argc, char *argv[]) {
       goto cleanup;
     }
   }
+
+  if (mountpoint) {
+    sds cmd = sdscatprintf(sdsempty(),
+                           "fusermount3 -u -q -z %s 2>/dev/null || fusermount "
+                           "-u -q -z %s 2>/dev/null",
+                           mountpoint, mountpoint);
+    int sys_ret = system(cmd);
+    (void)sys_ret;
+    sdsfree(cmd);
+    free(mountpoint);
+  }
+
+  fuse_opt_add_arg(&args, "-oauto_unmount");
   ret = fuse_main(args.argc, args.argv, &remfuse_ops, NULL);
 cleanup:
   fuse_opt_free_args(&args);
