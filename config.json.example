@@ -1,5 +1,10 @@
 {
-  "data_dir": "/home/root/.local/share/remarkable/xochitl",
-  "template_dir": "/usr/share/remarkable/templates",
-  "renderers": ["svg", "png", "pdf"]
+  "data_dir": "/absolute/path/to/xochitl",
+  "template_dir": "/absolute/path/to/templates",
+  "renderers": ["svg", "png", "pdf"],
+  "svg": true,
+  "png": true,
+  "pdf": true,
+  "mutable": false,
+  "standalone_annotations": false
 }
