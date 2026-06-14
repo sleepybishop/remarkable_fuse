@@ -27,9 +27,9 @@ mkdir $mnt_dir;
 
 # Copy sample PDF files and metadata
 my $doc_uuid = "98a5e265-2a12-4d23-81f7-03fee0b5554c";
-copy("xochitl/$doc_uuid.content", "$xochitl_dir/$doc_uuid.content");
-copy("xochitl/$doc_uuid.pagedata", "$xochitl_dir/$doc_uuid.pagedata");
-copy("xochitl/$doc_uuid.pdf", "$xochitl_dir/$doc_uuid.pdf");
+copy("t/assets/xochitl/$doc_uuid.content", "$xochitl_dir/$doc_uuid.content");
+copy("t/assets/xochitl/$doc_uuid.pagedata", "$xochitl_dir/$doc_uuid.pagedata");
+copy("t/assets/xochitl/$doc_uuid.pdf", "$xochitl_dir/$doc_uuid.pdf");
 
 # Write custom metadata to place it at the root of the FUSE mount as "MyPDF"
 open(my $met_fh, '>', "$xochitl_dir/$doc_uuid.metadata") or die "Could not write metadata: $!";
@@ -53,7 +53,7 @@ close($met_fh);
 # Create the page strokes subdirectory and copy our sample annotations
 my $page_uuid = "5609e168-e583-4741-8ac0-3c1098adf112";
 make_path("$xochitl_dir/$doc_uuid");
-copy("t/test_v6.rm", "$xochitl_dir/$doc_uuid/$page_uuid.rm") or die "Could not copy test strokes: $!";
+copy("t/assets/test_v6.rm", "$xochitl_dir/$doc_uuid/$page_uuid.rm") or die "Could not copy test strokes: $!";
 
 # Test Case 1: standalone_annotations => false
 my $config_file = "$tmp_dir/config.json";

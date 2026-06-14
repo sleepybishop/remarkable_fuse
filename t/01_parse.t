@@ -7,7 +7,7 @@ use Test::More tests => 4;
 ok(-x './remfmt', 'remfmt binary exists and is executable');
 
 # Test parsing a valid v6 file (success case)
-system("./remfmt t/test_v6.rm svg > /dev/null");
+system("./remfmt t/assets/test_v6.rm svg > /dev/null");
 is($?, 0, 'parsing a valid v6 file succeeds (exit code 0)');
 
 # Test parsing an empty file (failure case)

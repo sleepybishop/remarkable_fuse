@@ -7,7 +7,7 @@ use Test::More tests => 8;
 ok(-x './remfmt', 'remfmt binary exists and is executable');
 
 # Test rendering a version 6 file to PDF
-my $output_pdf = `./remfmt t/test_v6.rm pdf`;
+my $output_pdf = `./remfmt t/assets/test_v6.rm pdf`;
 is($?, 0, 'remfmt pdf exit code is 0');
 like($output_pdf, qr/^%PDF-1\.4/m, 'output has PDF signature');
 like($output_pdf, qr/\/Type \/Catalog/m, 'output has Catalog object');

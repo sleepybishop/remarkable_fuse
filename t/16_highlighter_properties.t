@@ -11,7 +11,7 @@ my $tmp_dir = tempdir(CLEANUP => 1);
 my $out_svg = "$tmp_dir/out.svg";
 
 # We run remfmt on test_v6_glyph.rm which contains Highlighter V2 strokes
-system("./remfmt t/test_v6_glyph.rm svg > $out_svg 2>/dev/null");
+system("./remfmt t/assets/test_v6_glyph.rm svg > $out_svg 2>/dev/null");
 is($?, 0, 'remfmt svg exit code is 0');
 
 # Verify that the generated SVG contains stroke-linecap="square" or opacity="0.25"

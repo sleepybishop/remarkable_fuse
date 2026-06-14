@@ -18,7 +18,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y gcc make libfuse-dev perl
+        sudo apt-get install -y gcc make libfuse-dev libpng-dev poppler-utils perl
 
     - name: Build and run tests
       run: make check

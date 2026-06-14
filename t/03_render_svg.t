@@ -7,7 +7,7 @@ use Test::More tests => 5;
 ok(-x './remfmt', 'remfmt binary exists and is executable');
 
 # Test rendering a version 6 file to SVG
-my $output_svg = `./remfmt t/test_v6.rm svg`;
+my $output_svg = `./remfmt t/assets/test_v6.rm svg`;
 is($?, 0, 'remfmt svg exit code is 0');
 like($output_svg, qr/<svg/i, 'output contains svg opening tag');
 like($output_svg, qr/<\/svg>/i, 'output contains svg closing tag');

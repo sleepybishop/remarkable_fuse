@@ -9,7 +9,7 @@ ok(-x './pdfoverlay', 'pdfoverlay binary exists and is executable');
 
 my $tmp_dir = tempdir(CLEANUP => 1);
 my $out_pdf = "$tmp_dir/out.pdf";
-my $src_pdf = "./xochitl/98a5e265-2a12-4d23-81f7-03fee0b5554c.pdf";
+my $src_pdf = "./t/assets/98a5e265-2a12-4d23-81f7-03fee0b5554c.pdf";
 my $src_png = "./templates/Blank.png";
 
 # Run pdfoverlay

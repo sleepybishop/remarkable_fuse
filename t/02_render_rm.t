@@ -11,7 +11,7 @@ ok(-x './remfmt', 'remfmt binary exists and is executable');
 my ($fh, $filename) = tempfile(SUFFIX => '.rm', UNLINK => 1);
 close($fh);
 
-system("./remfmt t/test_v6.rm rm > $filename");
+system("./remfmt t/assets/test_v6.rm rm > $filename");
 is($?, 0, 'rendering to rm exit code is 0');
 
 # Verify output is a valid RM file by checking header magic

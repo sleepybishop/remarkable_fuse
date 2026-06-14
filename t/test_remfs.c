@@ -3,7 +3,7 @@
 #include "remfs.h"
 
 int main() {
-    remfs_ctx *ctx = remfs_init("./xochitl");
+    remfs_ctx *ctx = remfs_init("./t/assets/xochitl");
     if (!ctx) {
         printf("Failed to init remfs\n");
         return 1;

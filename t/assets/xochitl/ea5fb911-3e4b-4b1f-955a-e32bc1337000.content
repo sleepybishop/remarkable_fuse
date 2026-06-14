@@ -1,0 +1,39 @@
+{
+    "cPages": {
+        "lastOpened": {
+            "timestamp": "1:1",
+            "value": "page1111-1111-1111-1111-111111111111"
+        },
+        "original": {
+            "timestamp": "0:0",
+            "value": -1
+        },
+        "pages": [
+            {
+                "id": "page1111-1111-1111-1111-111111111111",
+                "idx": {
+                    "timestamp": "1:1",
+                    "value": "ba"
+                },
+                "template": {
+                    "timestamp": "1:1",
+                    "value": "Generic"
+                }
+            },
+            {
+                "id": "page2222-2222-2222-2222-222222222222",
+                "idx": {
+                    "timestamp": "1:1",
+                    "value": "bb"
+                },
+                "template": {
+                    "timestamp": "1:1",
+                    "value": "Blank"
+                }
+            }
+        ]
+    },
+    "fileType": "notebook",
+    "formatVersion": 2,
+    "pageCount": 2
+}
