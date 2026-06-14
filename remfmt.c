@@ -171,12 +171,12 @@ static void set_pen_attr(remfmt_stroke *st) {
   case ERASER:
     st->color = WHITE;
     st->square_cap = true;
-    st->opacity = 0.0;
+    st->opacity = 1.0;
     break;
   case ERASE_AREA:
     st->color = WHITE;
     st->square_cap = true;
-    st->opacity = 0.0;
+    st->opacity = 1.0;
     break;
   case SHADER:
     st->opacity = 0.10;
@@ -320,17 +320,17 @@ static png_brush_meta get_png_brush(unsigned pen_type) {
   case 6: // Eraser
     bm.alpha = 1.0f;
     bm.width_scale = 1.0f;
-    bm.skip = true;
+    bm.skip = false;
     break;
   case 7: // Eraser area
     bm.alpha = 1.0f;
     bm.width_scale = 1.0f;
-    bm.skip = true;
+    bm.skip = false;
     break;
   case 8: // Erase all
     bm.alpha = 1.0f;
     bm.width_scale = 1.0f;
-    bm.skip = true;
+    bm.skip = false;
     break;
   case 12: // Ballpoint v2
     bm.alpha = 1.0f;
@@ -517,7 +517,7 @@ static void write_png_to_stream(FILE *stream, canvas_pixel *canvas, int width,
 
 static void draw_circle(canvas_pixel *canvas, uint8_t *mask, int width,
                         int height, float x, float y, float r,
-                        uint32_t stroke_color, float alpha) {
+                        uint32_t stroke_color, float alpha, bool is_eraser) {
   float min_x = x - r - 1.0f;
   float max_x = x + r + 1.0f;
   float min_y = y - r - 1.0f;
@@ -574,22 +574,26 @@ static void draw_circle(canvas_pixel *canvas, uint8_t *mask, int width,
           float final_alpha = alpha * coverage;
           canvas_pixel *pixel = &canvas[idx];
 
-          float dst_a = pixel->a / 255.0f;
-          float out_a = final_alpha + dst_a * (1.0f - final_alpha);
-          if (out_a > 0.001f) {
-            pixel->r = (uint8_t)((src_r * final_alpha +
-                                  pixel->r * dst_a * (1.0f - final_alpha)) /
-                                     out_a +
-                                 0.5f);
-            pixel->g = (uint8_t)((src_g * final_alpha +
-                                  pixel->g * dst_a * (1.0f - final_alpha)) /
-                                     out_a +
-                                 0.5f);
-            pixel->b = (uint8_t)((src_b * final_alpha +
-                                  pixel->b * dst_a * (1.0f - final_alpha)) /
-                                     out_a +
-                                 0.5f);
-            pixel->a = (uint8_t)(out_a * 255.0f + 0.5f);
+          if (is_eraser) {
+            pixel->a = (uint8_t)(pixel->a * (1.0f - final_alpha) + 0.5f);
+          } else {
+            float dst_a = pixel->a / 255.0f;
+            float out_a = final_alpha + dst_a * (1.0f - final_alpha);
+            if (out_a > 0.001f) {
+              pixel->r = (uint8_t)((src_r * final_alpha +
+                                    pixel->r * dst_a * (1.0f - final_alpha)) /
+                                       out_a +
+                                   0.5f);
+              pixel->g = (uint8_t)((src_g * final_alpha +
+                                    pixel->g * dst_a * (1.0f - final_alpha)) /
+                                       out_a +
+                                   0.5f);
+              pixel->b = (uint8_t)((src_b * final_alpha +
+                                    pixel->b * dst_a * (1.0f - final_alpha)) /
+                                       out_a +
+                                   0.5f);
+              pixel->a = (uint8_t)(out_a * 255.0f + 0.5f);
+            }
           }
         }
       }
@@ -599,7 +603,8 @@ static void draw_circle(canvas_pixel *canvas, uint8_t *mask, int width,
 
 static void draw_segment(canvas_pixel *canvas, uint8_t *mask, int width,
                          int height, float x1, float y1, float x2, float y2,
-                         float r, uint32_t stroke_color, float alpha) {
+                         float r, uint32_t stroke_color, float alpha,
+                         bool is_eraser) {
   float dx = x2 - x1;
   float dy = y2 - y1;
   float l2 = dx * dx + dy * dy;
@@ -671,22 +676,26 @@ static void draw_segment(canvas_pixel *canvas, uint8_t *mask, int width,
           float final_alpha = alpha * coverage;
           canvas_pixel *pixel = &canvas[idx];
 
-          float dst_a = pixel->a / 255.0f;
-          float out_a = final_alpha + dst_a * (1.0f - final_alpha);
-          if (out_a > 0.001f) {
-            pixel->r = (uint8_t)((src_r * final_alpha +
-                                  pixel->r * dst_a * (1.0f - final_alpha)) /
-                                     out_a +
-                                 0.5f);
-            pixel->g = (uint8_t)((src_g * final_alpha +
-                                  pixel->g * dst_a * (1.0f - final_alpha)) /
-                                     out_a +
-                                 0.5f);
-            pixel->b = (uint8_t)((src_b * final_alpha +
-                                  pixel->b * dst_a * (1.0f - final_alpha)) /
-                                     out_a +
-                                 0.5f);
-            pixel->a = (uint8_t)(out_a * 255.0f + 0.5f);
+          if (is_eraser) {
+            pixel->a = (uint8_t)(pixel->a * (1.0f - final_alpha) + 0.5f);
+          } else {
+            float dst_a = pixel->a / 255.0f;
+            float out_a = final_alpha + dst_a * (1.0f - final_alpha);
+            if (out_a > 0.001f) {
+              pixel->r = (uint8_t)((src_r * final_alpha +
+                                    pixel->r * dst_a * (1.0f - final_alpha)) /
+                                       out_a +
+                                   0.5f);
+              pixel->g = (uint8_t)((src_g * final_alpha +
+                                    pixel->g * dst_a * (1.0f - final_alpha)) /
+                                       out_a +
+                                   0.5f);
+              pixel->b = (uint8_t)((src_b * final_alpha +
+                                    pixel->b * dst_a * (1.0f - final_alpha)) /
+                                       out_a +
+                                   0.5f);
+              pixel->a = (uint8_t)(out_a * 255.0f + 0.5f);
+            }
           }
         }
       }
@@ -811,6 +820,7 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
       float xOffset = (st->version == 6) ? (dev_w_st / 2.0f) : 0.0f;
 
       bool is_hl = (pen_type == 5 || pen_type == 18);
+      bool is_eraser = (pen_type == 6 || pen_type == 7 || pen_type == 8);
 
       int box_min_x = 0, box_max_x = 0, box_min_y = 0, box_max_y = 0;
       if (is_hl && mask != NULL) {
@@ -868,7 +878,8 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
           r = 0.5f;
 
         draw_circle(canvas, is_hl ? mask : NULL, width, height, x, y, r,
-                    stroke_color, bm.alpha);
+                    stroke_color, bm.alpha,
+                    is_eraser && prm && prm->annotation);
       } else {
         for (int j = 1; j < num_points; j++) {
           remfmt_seg prev = kv_A(st->segments, j - 1);
@@ -898,7 +909,8 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
           float r = segWidth / 2.0f;
 
           draw_segment(canvas, is_hl ? mask : NULL, width, height, x1, y1, x2,
-                       y2, r, stroke_color, bm.alpha);
+                       y2, r, stroke_color, bm.alpha,
+                       is_eraser && prm && prm->annotation);
         }
       }
 
@@ -1150,12 +1162,16 @@ void remfmt_render_pdf(FILE *stream, remfmt_stroke_vec *strokes,
 
       float seg_alpha = get_seg_alpha(&st, &kv_A(st.segments, 0));
       const char *gs_state = "/GS100";
-      if (seg_alpha < 0.15) {
-        gs_state = "/GS10";
-      } else if (seg_alpha < 0.35) {
-        gs_state = "/GS25";
-      } else if (seg_alpha < 0.95) {
-        gs_state = "/GS90";
+      if (st.pen == ERASER || st.pen == ERASE_AREA) {
+        gs_state = "/GS100";
+      } else {
+        if (seg_alpha < 0.15) {
+          gs_state = "/GS10";
+        } else if (seg_alpha < 0.35) {
+          gs_state = "/GS25";
+        } else if (seg_alpha < 0.95) {
+          gs_state = "/GS90";
+        }
       }
 
       pdf_content = sdscatprintf(pdf_content, "q\n");
