@@ -35,7 +35,7 @@ t/test_remfs: t/test_remfs.c libremfs.a
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ t/test_remfs.c libremfs.a $(LDLIBS)
 
 clean:
-	$(RM) *.o deps/cJSON/*.o deps/struct/src/*.o deps/*.o libremfs.a remfs remfmt t/test_remfs
+	$(RM) *.o deps/cJSON/*.o deps/struct/src/*.o deps/sds/*.o deps/*.o libremfs.a remfs remfmt t/test_remfs
 
 indent:
 	clang-format -style=LLVM -i *.c *.h
