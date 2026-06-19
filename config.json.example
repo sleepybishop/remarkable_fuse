@@ -2,9 +2,6 @@
   "data_dir": "/absolute/path/to/xochitl",
   "template_dir": "/absolute/path/to/templates",
   "renderers": ["svg", "png", "pdf"],
-  "svg": true,
-  "png": true,
-  "pdf": true,
   "mutable": false,
   "standalone_annotations": false
 }

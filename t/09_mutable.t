@@ -16,7 +16,7 @@ if (!$has_fuse) {
     plan skip_all => "FUSE is not available or writeable on this system";
 }
 
-plan tests => 10;
+plan tests => 12;
 
 # Setup temp directories
 my $tmp_dir = tempdir(CLEANUP => 1);
@@ -28,15 +28,13 @@ mkdir $mnt_dir;
 # Write config file with mutability enabled
 my $config_file = "$tmp_dir/config.json";
 open(my $fh, '>', $config_file) or die "Could not write config: $!";
-print $fh <<EOF;
+print $fh <<EOC;
 {
     "data_dir": "$xochitl_dir",
     "mutable": true,
-    "svg": false,
-    "png": false,
-    "pdf": false
+    "renderers": []
 }
-EOF
+EOC
 close($fh);
 
 # Start remfs FUSE mount in background
@@ -54,34 +52,21 @@ sleep(0.5);
 my @files = glob("$mnt_dir/*");
 ok(1, "remfs daemon started with PID $pid");
 
-# Test 1: Create a Collection (Folder)
+# Test 1: Create a Collection (Folder) fails
 my $folder_name = "MyFolder";
 my $mkdir_ret = mkdir("$mnt_dir/$folder_name");
-ok($mkdir_ret, "mkdir Collection succeeds");
+ok(!$mkdir_ret, "mkdir Collection fails");
 
-# Verify a metadata file was generated
+# Verify no metadata file was generated
 my @metadata_files = glob("$xochitl_dir/*.metadata");
-is(scalar @metadata_files, 1, "One metadata file was created in xochitl");
+is(scalar @metadata_files, 0, "No metadata file was created in xochitl");
 
-# Test 2: Create a Notebook
+# Test 2: Create a Notebook fails
 my $notebook_name = "MyNotebook.notebook";
 my $mkdir_nb_ret = mkdir("$mnt_dir/$notebook_name");
-ok($mkdir_nb_ret, "mkdir Notebook succeeds") or diag("mkdir Notebook failed: $!");
+ok(!$mkdir_nb_ret, "mkdir Notebook fails");
 
-# Test 3: Create a Page (.rm file) inside the notebook
-my $page_file = "$mnt_dir/MyNotebook.notebook/page_000001.rm";
-open(my $pfh, '>', $page_file) or warn "Could not create page file: $!";
-if ($pfh) {
-    print $pfh "reMarkable .lines file, version=6          stroke_data_here";
-    close($pfh);
-}
-ok(-f $page_file, "Created page_000001.rm inside Notebook");
-
-# Test 4: Delete the Collection (Tombstoning)
-my $rmdir_ret = rmdir("$mnt_dir/$folder_name");
-ok($rmdir_ret, "rmdir Collection succeeds");
-
-# Test 5: Import a PDF
+# Test 3: Import a PDF
 open(my $pdf_fh, '>', "$mnt_dir/my_book.pdf") or warn "Could not create pdf file: $!";
 if ($pdf_fh) {
     print $pdf_fh "%PDF-1.4 dummy data";
@@ -89,7 +74,7 @@ if ($pdf_fh) {
 }
 ok(-f "$mnt_dir/my_book.pdf", "Imported PDF file is visible");
 
-# Test 6: Import an EPUB
+# Test 4: Import an EPUB
 open(my $epub_fh, '>', "$mnt_dir/my_novel.epub") or warn "Could not create epub file: $!";
 if ($epub_fh) {
     print $epub_fh "EPUB dummy data";
@@ -97,7 +82,7 @@ if ($epub_fh) {
 }
 ok(-f "$mnt_dir/my_novel.epub", "Imported EPUB file is visible");
 
-# Test 7: Import a XOJ file to create a new Notebook
+# Test 5: Import a XOJ file to create a new Notebook
 my $xoj_source = "./misc/rm_grid_template.xoj";
 my $xoj_dest = "$mnt_dir/import.xoj";
 copy($xoj_source, $xoj_dest) or warn "Could not copy XOJ: $!";
@@ -109,6 +94,16 @@ sleep(0.2);
 ok(-d "$mnt_dir/import", "New notebook directory was created for imported XOJ");
 my @rm_files = glob("$mnt_dir/import/*.rm");
 is(scalar @rm_files, 1, "Imported XOJ file and verified the new notebook page was generated");
+
+# Test 6: Remove the EPUB
+my $unlink_epub_ret = unlink("$mnt_dir/my_novel.epub");
+ok($unlink_epub_ret, "Removed EPUB file");
+ok(! -f "$mnt_dir/my_novel.epub", "EPUB file is gone");
+
+# Test 7: Remove the Notebook directory
+my $rmdir_nb_ret = rmdir("$mnt_dir/import");
+ok($rmdir_nb_ret, "Removed Notebook directory");
+ok(! -d "$mnt_dir/import", "Notebook directory is gone");
 
 # Clean up FUSE daemon
 kill('TERM', $pid);

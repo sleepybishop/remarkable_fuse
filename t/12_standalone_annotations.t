@@ -62,9 +62,7 @@ print $fh <<EOF;
 {
     "data_dir": "$xochitl_dir",
     "mutable": false,
-    "svg": false,
-    "png": false,
-    "pdf": true,
+    "renderers": ["pdf"],
     "standalone_annotations": false
 }
 EOF
@@ -93,9 +91,7 @@ print $fh <<EOF;
 {
     "data_dir": "$xochitl_dir",
     "mutable": false,
-    "svg": false,
-    "png": false,
-    "pdf": true,
+    "renderers": ["pdf"],
     "standalone_annotations": true
 }
 EOF

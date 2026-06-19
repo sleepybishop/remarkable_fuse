@@ -30,16 +30,13 @@ sudo apt-get install libfuse-dev libpng-dev
    ```
 2. Create a `config.json` file in the project root:
    ```json
-   {
-       "data_dir": "/absolute/path/to/xochitl",
-       "template_dir": "/absolute/path/to/templates",
-       "renderers": ["svg", "png", "pdf"],
-       "svg": true,
-       "png": true,
-       "pdf": true,
-       "mutable": false,
-       "standalone_annotations": false
-   }
+    {
+        "data_dir": "/absolute/path/to/xochitl",
+        "template_dir": "/absolute/path/to/templates",
+        "renderers": ["svg", "png", "pdf"],
+        "mutable": false,
+        "standalone_annotations": false
+    }
    ```
    *(See `config.json.example` for details. Use absolute paths to ensure the FUSE daemon resolves them correctly).*
 
@@ -50,10 +47,7 @@ The filesystem is configured via a JSON file (by default `config.json` in the cu
 - **`data_dir`** (string, default: `"./xochitl"`): The absolute path to the local copy of the reMarkable `xochitl` data folder containing files with UUID names.
 - **`template_dir`** (string): The path to the directory containing templates (e.g. background grids, lined paper, custom templates). When rendering pages, `remarkable_fuse` will search this directory for PNGs matching the page's template name.
 - **`renderers`** (array of strings, default: `["svg", "png", "pdf"]`): The file formats to auto-convert `.rm` files into. If defined, only the listed formats are enabled.
-- **`svg`** (boolean, default: `true`): Enable or disable SVG rendering/directories.
-- **`png`** (boolean, default: `true`): Enable or disable PNG rendering/directories.
-- **`pdf`** (boolean, default: `true`): Enable or disable PDF rendering/directories (including annotation overlays).
-- **`mutable`** or **`mutability`** (boolean, default: `false`): Enable or disable write/modification operations. When set to `true`, you can create/delete notebooks, folders, and pages directly from the FUSE mount, as well as import PDFs/EPUBs.
+- **`mutable`** (boolean, default: `false`): Enable or disable write/modification operations. When set to `true`, you can create/delete notebooks, folders, and pages directly from the FUSE mount, as well as import PDFs/EPUBs.
 - **`standalone_annotations`** (boolean, default: `false`): Exposes separate page-by-page rendering directories and standalone annotations (under `<Document Name> Annotations/` containing subfolders `svg/`, `png/`, and `pdf/` with individual pages that have annotations).
 
 3. Build the project
@@ -84,5 +78,7 @@ You can also use the standalone `remfmt` binary to convert individual `.rm` file
 
 ### NOT IMPLEMENTED
   - Typed text input parsing and rendering (v6 scene graph)
+  - JSON template support
+
 
 
