@@ -588,9 +588,9 @@ static int remfuse_getattr(const char *path, struct stat *stbuf) {
               stbuf->st_mtime = cached->mtime;
               release_cached_entry(cached);
             } else {
-              stbuf->st_size = ref->file->page_count * 1024 * 1024;
-              if (stbuf->st_size < 1024 * 1024) {
-                stbuf->st_size = 1024 * 1024;
+              stbuf->st_size = ref->file->page_count * 15 * 1024 * 1024;
+              if (stbuf->st_size < 15 * 1024 * 1024) {
+                stbuf->st_size = 15 * 1024 * 1024;
               }
               stbuf->st_mtime = latest_mtime;
             }
@@ -599,7 +599,10 @@ static int remfuse_getattr(const char *path, struct stat *stbuf) {
             ret = stat(newpath, stbuf);
             if (ret == 0) {
               const char *type_str =
-                  (flags & IS_SVG) ? "svg" : ((flags & IS_PDF) ? "pdf" : ((flags & IS_XOJ) ? "xoj" : "png"));
+                  (flags & IS_SVG)
+                      ? "svg"
+                      : ((flags & IS_PDF) ? "pdf"
+                                          : ((flags & IS_XOJ) ? "xoj" : "png"));
               if (ref->file->filetype == PDF && (flags & IS_PDF)) {
                 if (flags & IS_ANNOTATED_PDF) {
                   cache_entry *entry =
@@ -632,7 +635,12 @@ static int remfuse_getattr(const char *path, struct stat *stbuf) {
                   stbuf->st_size = cached->size;
                   release_cached_entry(cached);
                 } else {
-                  stbuf->st_size = 5 * 1024 * 1024;
+                  if (strcmp(type_str, "png") == 0 ||
+                      strcmp(type_str, "pdf") == 0) {
+                    stbuf->st_size = 15 * 1024 * 1024;
+                  } else {
+                    stbuf->st_size = 5 * 1024 * 1024;
+                  }
                 }
               }
             }
@@ -2033,6 +2041,16 @@ int main(int argc, char *argv[]) {
     struct stat st;
     if (stat("config.json", &st) == 0) {
       load_config("config.json");
+    }
+  }
+
+  if (template_dir == NULL) {
+    struct stat st;
+    if (stat("./templates", &st) == 0 && S_ISDIR(st.st_mode)) {
+      template_dir = strdup("./templates");
+    } else if (stat("/usr/share/remarkable/templates", &st) == 0 &&
+               S_ISDIR(st.st_mode)) {
+      template_dir = strdup("/usr/share/remarkable/templates");
     }
   }
 

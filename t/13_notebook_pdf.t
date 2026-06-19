@@ -28,22 +28,7 @@ mkdir $mnt_dir;
 # Copy sample notebook files and metadata
 my $doc_uuid = "ea5fb911-3e4b-4b1f-955a-e32bc1337000";
 copy("t/assets/xochitl/$doc_uuid.content", "$xochitl_dir/$doc_uuid.content") or die "Copy content failed: $!";
-copy("t/assets/xochitl/$doc_uuid.pagedata", "$xochitl_dir/$doc_uuid.pagedata") or die "Copy pagedata failed: $!";
 copy("t/assets/xochitl/$doc_uuid.metadata", "$xochitl_dir/$doc_uuid.metadata") or die "Copy metadata failed: $!";
-
-# Replace template names in the copied .pagedata file so we only use Generic or Blank templates
-my $pagedata_path = "$xochitl_dir/$doc_uuid.pagedata";
-if (-f $pagedata_path) {
-    open(my $read_fh, '<', $pagedata_path) or die "Cannot open copied pagedata for reading: $!";
-    my @lines = <$read_fh>;
-    close($read_fh);
-    for my $line (@lines) {
-        $line =~ s/^P Dots S/Generic/g;
-    }
-    open(my $write_fh, '>', $pagedata_path) or die "Cannot open copied pagedata for writing: $!";
-    print $write_fh @lines;
-    close($write_fh);
-}
 
 make_path("$xochitl_dir/$doc_uuid");
 # Copy all .rm files in the directory

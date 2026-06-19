@@ -355,6 +355,25 @@ static void parse_content(const char *path, remfs_file *file,
         snprintf(page.parent, sizeof(page.parent), "%s", file->uuid);
         snprintf(page.visible_name, RM_PATH_MAX, "page_%06u", 1 + pn++);
 
+        if (cJSON_IsObject(n)) {
+          cJSON *temp_obj = cJSON_GetObjectItem(n, "template");
+          if (temp_obj) {
+            const char *tpl_val = NULL;
+            if (cJSON_IsString(temp_obj)) {
+              tpl_val = cJSON_GetStringValue(temp_obj);
+            } else if (cJSON_IsObject(temp_obj)) {
+              cJSON *val_obj = cJSON_GetObjectItem(temp_obj, "value");
+              if (cJSON_IsString(val_obj)) {
+                tpl_val = cJSON_GetStringValue(val_obj);
+              }
+            }
+            if (tpl_val) {
+              snprintf(page.template_name, sizeof(page.template_name), "%s",
+                       tpl_val);
+            }
+          }
+        }
+
         kv_push(remfs_file, *fv, page);
       }
     }
