@@ -21,7 +21,7 @@ int main(int argc, char *argv[]) {
   if (arg_idx + 1 >= argc) {
     fprintf(stderr,
             "usage: %s [--template-dir <dir> --template-name <name>] "
-            "<input.rm> (svg|png|pdf|rm)\n",
+            "<input.rm> (svg|png|pdf|xoj|rm)\n",
             argv[0]);
     exit(1);
   }
@@ -40,10 +40,13 @@ int main(int argc, char *argv[]) {
     remfmt_render_png(out, strokes, &prm);
   } else if (strcmp(argv[arg_idx + 1], "pdf") == 0) {
     remfmt_render_pdf(out, strokes, &prm);
+  } else if (strcmp(argv[arg_idx + 1], "xoj") == 0) {
+    remfmt_render_xoj(out, strokes, &prm);
   } else if (strcmp(argv[arg_idx + 1], "rm") == 0) {
     remfmt_render_rm(out, strokes);
   } else {
-    fprintf(stderr, "error: unknown format %s (must be svg, png, pdf, or rm)\n",
+    fprintf(stderr,
+            "error: unknown format %s (must be svg, png, pdf, xoj, or rm)\n",
             argv[arg_idx + 1]);
     remfmt_stroke_cleanup(strokes);
     return 1;
