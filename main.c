@@ -1,6 +1,6 @@
 #define FUSE_USE_VERSION 26
-
 #include <assert.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <fuse.h>
@@ -13,6 +13,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #include "cJSON.h"
 #include "deps/sds/sds.h"
@@ -483,7 +484,42 @@ static int remfuse_getattr(const char *path, struct stat *stbuf) {
   memset(stbuf, 0, sizeof(struct stat));
   int flags = 0;
   pthread_mutex_lock(&remfs_mutex);
-  if (strcmp(path, "/") == 0) {
+  size_t len = strlen(path);
+  bool is_xoj = (len >= 4 && strcmp(path + len - 4, ".xoj") == 0) ||
+                (len >= 5 && strcmp(path + len - 5, ".xopp") == 0);
+  if (is_xoj) {
+    sds parent_path = sdsempty();
+    sds name = sdsempty();
+    get_parent_and_name(path, &parent_path, &name);
+    uuid_map_node *parent_node = NULL;
+    if (strcmp(parent_path, "/") != 0) {
+      parent_node = remfs_path_search(ctx, parent_path);
+    }
+    if (!parent_node || parent_node->file->type == COLLECTION) {
+      const char *parent_uuid = parent_node ? parent_node->file->uuid : "";
+      sds temp_path = sdscatprintf(sdsempty(), "%s/xojimport_%s_%s.tmp", ctx->src_dir,
+                                   parent_uuid, name);
+      struct stat tmp_st;
+      if (stat(temp_path, &tmp_st) == 0) {
+        stbuf->st_mode = S_IFREG | 0666;
+        stbuf->st_nlink = 1;
+        stbuf->st_size = tmp_st.st_size;
+        stbuf->st_uid = getuid();
+        stbuf->st_gid = getgid();
+        stbuf->st_atime = tmp_st.st_atime;
+        stbuf->st_mtime = tmp_st.st_mtime;
+        stbuf->st_ctime = tmp_st.st_ctime;
+        ret = 0;
+      }
+      sdsfree(temp_path);
+    }
+    sdsfree(parent_path);
+    sdsfree(name);
+  }
+
+  if (ret == 0) {
+    // Already found xoj tmp file
+  } else if (strcmp(path, "/") == 0) {
     ret = stat(ctx->src_dir, stbuf);
   } else {
     sds newpath = sdsempty();
@@ -1145,12 +1181,416 @@ static int remfuse_open(const char *path, struct fuse_file_info *fi) {
   }
 }
 
+// Appends a varuint to an sds string
+static sds sds_append_varuint(sds s, uint32_t val) {
+  uint8_t buf[10];
+  int len = 0;
+  while (1) {
+    uint8_t b = val & 0x7F;
+    val >>= 7;
+    if (val > 0) {
+      buf[len++] = b | 0x80;
+    } else {
+      buf[len++] = b;
+      break;
+    }
+  }
+  return sdscatlen(s, buf, len);
+}
+
+// Appends a CRDT ID: part1 (1 byte) + part2 (varuint)
+static sds sds_append_crdt_id(sds s, uint8_t p1, uint32_t p2) {
+  s = sdscatlen(s, &p1, 1);
+  return sds_append_varuint(s, p2);
+}
+
+// Appends a tag: (index << 4) | typ
+static sds sds_append_tag(sds s, uint32_t index, uint8_t typ) {
+  uint32_t val = (index << 4) | typ;
+  return sds_append_varuint(s, val);
+}
+
+typedef struct {
+  float x;
+  float y;
+} xoj_point;
+
+typedef struct {
+  float width;
+  xoj_point *points;
+  int num_points;
+} xoj_stroke;
+
+typedef struct {
+  xoj_stroke *strokes;
+  int num_strokes;
+} xoj_page;
+
+static sds generate_rm_data(xoj_stroke *strokes, int num_strokes) {
+  sds out = sdsnewlen("reMarkable .lines file, version=6          ", 43);
+  uint32_t crdt_seq = 1;
+
+  for (int i = 0; i < num_strokes; i++) {
+    xoj_stroke *st = &strokes[i];
+    sds block_body = sdsempty();
+
+    for (int tag = 1; tag <= 4; tag++) {
+      block_body = sds_append_tag(block_body, tag, 0xF);
+      block_body = sds_append_crdt_id(block_body, 0, crdt_seq++);
+    }
+
+    block_body = sds_append_tag(block_body, 5, 0x4);
+    uint32_t val_zero = 0;
+    block_body = sdscatlen(block_body, &val_zero, 4);
+
+    sds subblock = sdsempty();
+    uint8_t item_type = 0x03; // line item
+    subblock = sdscatlen(subblock, &item_type, 1);
+
+    uint32_t tool_id = 1; // Pen
+    subblock = sds_append_tag(subblock, 1, 0x4);
+    subblock = sdscatlen(subblock, &tool_id, 4);
+
+    uint32_t color_id = 0; // Black
+    subblock = sds_append_tag(subblock, 2, 0x4);
+    subblock = sdscatlen(subblock, &color_id, 4);
+
+    double stroke_width = (double)st->width;
+    subblock = sds_append_tag(subblock, 3, 0x8);
+    subblock = sdscatlen(subblock, &stroke_width, 8);
+
+    float val_float_zero = 0.0f;
+    subblock = sds_append_tag(subblock, 4, 0x4);
+    subblock = sdscatlen(subblock, &val_float_zero, 4);
+
+    sds points_data = sdsempty();
+    for (int p = 0; p < st->num_points; p++) {
+      float pt_x = st->points[p].x;
+      float pt_y = st->points[p].y;
+      uint16_t speed = 0;
+      uint16_t direction = 4;
+      uint8_t width = 0;
+      uint8_t pressure = 127;
+      points_data = sdscatlen(points_data, &pt_x, 4);
+      points_data = sdscatlen(points_data, &pt_y, 4);
+      points_data = sdscatlen(points_data, &speed, 2);
+      points_data = sdscatlen(points_data, &direction, 2);
+      points_data = sdscatlen(points_data, &width, 1);
+      points_data = sdscatlen(points_data, &pressure, 1);
+    }
+
+    subblock = sds_append_tag(subblock, 5, 0xC);
+    uint32_t points_len = (uint32_t)sdslen(points_data);
+    subblock = sdscatlen(subblock, &points_len, 4);
+    subblock = sdscatsds(subblock, points_data);
+    sdsfree(points_data);
+
+    subblock = sds_append_tag(subblock, 6, 0xF);
+    subblock = sds_append_crdt_id(subblock, 0, crdt_seq++);
+
+    block_body = sds_append_tag(block_body, 6, 0xC);
+    uint32_t subblock_len = (uint32_t)sdslen(subblock);
+    block_body = sdscatlen(block_body, &subblock_len, 4);
+    block_body = sdscatsds(block_body, subblock);
+    sdsfree(subblock);
+
+    // block_hdr: len (4 bytes), unknown (1 byte), min_version (1 byte), current_version (1 byte), block_type (1 byte)
+    uint32_t body_len = (uint32_t)sdslen(block_body);
+    uint8_t hdr_bytes[4] = {0, 2, 2, 0x05};
+    out = sdscatlen(out, &body_len, 4);
+    out = sdscatlen(out, hdr_bytes, 4);
+    out = sdscatsds(out, block_body);
+    sdsfree(block_body);
+  }
+
+  return out;
+}
+
+static char *get_attr_value(const char *tag, const char *attr_name) {
+  char search[128];
+  snprintf(search, sizeof(search), "%s=\"", attr_name);
+  char *p = strstr(tag, search);
+  if (!p) {
+    snprintf(search, sizeof(search), "%s='", attr_name);
+    p = strstr(tag, search);
+  }
+  if (!p) return NULL;
+  p += strlen(search);
+  char *end = strchr(p, p[-1]);
+  if (!end) return NULL;
+  size_t len = end - p;
+  char *val = malloc(len + 1);
+  memcpy(val, p, len);
+  val[len] = '\0';
+  return val;
+}
+
+static int parse_xoj_file(const char *filepath, xoj_page **pages_out, int *num_pages_out) {
+  gzFile f = gzopen(filepath, "rb");
+  if (!f) return -1;
+
+  xoj_page *pages = NULL;
+  int num_pages = 0;
+
+  sds current_tag = sdsempty();
+  sds stroke_text = sdsempty();
+  bool in_tag = false;
+  bool in_stroke_text = false;
+
+  float page_w = 1404.0f;
+  float page_h = 1872.0f;
+  float scale_x = 1.0f;
+  float scale_y = 1.0f;
+  float stroke_width = 2.0f;
+
+  char c;
+  while (gzread(f, &c, 1) == 1) {
+    if (c == '<') {
+      in_tag = true;
+      sdsclear(current_tag);
+      current_tag = sdscatlen(current_tag, &c, 1);
+    } else if (c == '>') {
+      if (in_tag) {
+        current_tag = sdscatlen(current_tag, &c, 1);
+        in_tag = false;
+
+        // Process tag
+        if (strncmp(current_tag, "<page", 5) == 0) {
+          // New page
+          pages = realloc(pages, (num_pages + 1) * sizeof(xoj_page));
+          pages[num_pages].strokes = NULL;
+          pages[num_pages].num_strokes = 0;
+          num_pages++;
+
+          char *w_str = get_attr_value(current_tag, "width");
+          char *h_str = get_attr_value(current_tag, "height");
+          if (w_str) {
+            page_w = strtof(w_str, NULL);
+            free(w_str);
+          } else {
+            page_w = 1404.0f;
+          }
+          if (h_str) {
+            page_h = strtof(h_str, NULL);
+            free(h_str);
+          } else {
+            page_h = 1872.0f;
+          }
+          scale_x = 1404.0f / page_w;
+          scale_y = 1872.0f / page_h;
+        } else if (strncmp(current_tag, "<stroke", 7) == 0) {
+          in_stroke_text = true;
+          sdsclear(stroke_text);
+
+          char *w_str = get_attr_value(current_tag, "width");
+          if (w_str) {
+            stroke_width = strtof(w_str, NULL) * scale_x / 2.0f;
+            free(w_str);
+          } else {
+            stroke_width = 2.0f * scale_x / 2.0f;
+          }
+        } else if (strcmp(current_tag, "</stroke>") == 0) {
+          in_stroke_text = false;
+          // Parse stroke text
+          if (num_pages > 0) {
+            xoj_page *curr_page = &pages[num_pages - 1];
+            curr_page->strokes = realloc(curr_page->strokes, (curr_page->num_strokes + 1) * sizeof(xoj_stroke));
+            xoj_stroke *curr_stroke = &curr_page->strokes[curr_page->num_strokes];
+            curr_stroke->width = stroke_width;
+            curr_stroke->points = NULL;
+            curr_stroke->num_points = 0;
+
+            char *p = stroke_text;
+            while (*p) {
+              while (*p && isspace((unsigned char)*p)) p++;
+              if (!*p) break;
+              char *next;
+              float x_val = strtof(p, &next);
+              if (next == p) break;
+              p = next;
+
+              while (*p && isspace((unsigned char)*p)) p++;
+              if (!*p) break;
+              float y_val = strtof(p, &next);
+              if (next == p) break;
+              p = next;
+
+              curr_stroke->points = realloc(curr_stroke->points, (curr_stroke->num_points + 1) * sizeof(xoj_point));
+              curr_stroke->points[curr_stroke->num_points].x = (x_val * scale_x) - 702.0f;
+              curr_stroke->points[curr_stroke->num_points].y = y_val * scale_y;
+              curr_stroke->num_points++;
+            }
+            curr_page->num_strokes++;
+          }
+        }
+      }
+    } else {
+      if (in_tag) {
+        current_tag = sdscatlen(current_tag, &c, 1);
+      } else if (in_stroke_text) {
+        stroke_text = sdscatlen(stroke_text, &c, 1);
+      }
+    }
+  }
+
+  sdsfree(current_tag);
+  sdsfree(stroke_text);
+  gzclose(f);
+
+  *pages_out = pages;
+  *num_pages_out = num_pages;
+  return 0;
+}
+
+static void free_xoj_pages(xoj_page *pages, int num_pages) {
+  if (!pages) return;
+  for (int i = 0; i < num_pages; i++) {
+    for (int j = 0; j < pages[i].num_strokes; j++) {
+      free(pages[i].strokes[j].points);
+    }
+    free(pages[i].strokes);
+  }
+  free(pages);
+}
+
 static int remfuse_release(const char *path, struct fuse_file_info *fi) {
   if (IS_CACHE_PTR(fi->fh)) {
     release_cached_entry(GET_CACHE_PTR(fi->fh));
-  } else {
-    close(fi->fh);
+    return 0;
   }
+
+  close(fi->fh);
+
+  size_t len = strlen(path);
+  bool is_xoj = (len >= 4 && strcmp(path + len - 4, ".xoj") == 0) ||
+                (len >= 5 && strcmp(path + len - 5, ".xopp") == 0);
+
+  if (is_xoj && enable_mutable) {
+    pthread_mutex_lock(&remfs_mutex);
+    struct fuse_context *fuse_ctx = fuse_get_context();
+    remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
+
+    sds parent_path = sdsempty();
+    sds name = sdsempty();
+    get_parent_and_name(path, &parent_path, &name);
+
+    uuid_map_node *parent_node = NULL;
+    if (strcmp(parent_path, "/") != 0) {
+      parent_node = remfs_path_search(ctx, parent_path);
+    }
+
+    if (!parent_node || parent_node->file->type == COLLECTION) {
+      const char *parent_uuid = parent_node ? parent_node->file->uuid : "";
+      sds temp_path = sdscatprintf(sdsempty(), "%s/xojimport_%s_%s.tmp", ctx->src_dir,
+                                   parent_uuid, name);
+
+      xoj_page *pages = NULL;
+      int num_pages = 0;
+      int parse_ret = parse_xoj_file(temp_path, &pages, &num_pages);
+
+      if (parse_ret == 0 && num_pages > 0) {
+        char doc_uuid[64];
+        gen_uuid(doc_uuid);
+
+        // 1. Create the notebook directory
+        sds dir_path = sdscatprintf(sdsempty(), "%s/%s", ctx->src_dir, doc_uuid);
+        mkdir(dir_path, 0755);
+        sdsfree(dir_path);
+
+        // 2. Create the metadata file
+        sds vis_name = sdsnew(name);
+        size_t v_len = sdslen(vis_name);
+        if (v_len >= 4 && strcmp(vis_name + v_len - 4, ".xoj") == 0) {
+          vis_name[v_len - 4] = '\0';
+        } else if (v_len >= 5 && strcmp(vis_name + v_len - 5, ".xopp") == 0) {
+          vis_name[v_len - 5] = '\0';
+        }
+        sdsupdatelen(vis_name);
+
+        cJSON *meta = cJSON_CreateObject();
+        cJSON_AddBoolToObject(meta, "deleted", false);
+        char last_mod[32];
+        sprintf(last_mod, "%llu", (unsigned long long)time(NULL) * 1000);
+        cJSON_AddStringToObject(meta, "lastModified", last_mod);
+        cJSON_AddStringToObject(meta, "parent", parent_uuid);
+        cJSON_AddBoolToObject(meta, "pinned", false);
+        cJSON_AddStringToObject(meta, "type", "DocumentType");
+        cJSON_AddStringToObject(meta, "visibleName", vis_name);
+        sdsfree(vis_name);
+
+        sds meta_path = sdscatprintf(sdsempty(), "%s/%s.metadata", ctx->src_dir, doc_uuid);
+        FILE *f_m = fopen(meta_path, "w");
+        if (f_m) {
+          char *str = cJSON_Print(meta);
+          fputs(str, f_m);
+          free(str);
+          fclose(f_m);
+        }
+        sdsfree(meta_path);
+        cJSON_Delete(meta);
+
+        // 3. Create content JSON and pagedata file
+        cJSON *content = cJSON_CreateObject();
+        cJSON_AddObjectToObject(content, "extraMetadata");
+        cJSON_AddStringToObject(content, "fileType", "notebook");
+        cJSON_AddStringToObject(content, "orientation", "portrait");
+        cJSON_AddArrayToObject(content, "pages");
+        cJSON *pages_arr = cJSON_GetObjectItem(content, "pages");
+
+        sds pagedata_path = sdscatprintf(sdsempty(), "%s/%s.pagedata", ctx->src_dir, doc_uuid);
+        FILE *f_p = fopen(pagedata_path, "w");
+
+        for (int p = 0; p < num_pages; p++) {
+          char page_uuid[64];
+          gen_uuid(page_uuid);
+
+          sds page_path = sdscatprintf(sdsempty(), "%s/%s/%s.rm", ctx->src_dir,
+                                       doc_uuid, page_uuid);
+          sds rm_data = generate_rm_data(pages[p].strokes, pages[p].num_strokes);
+          FILE *f_rm = fopen(page_path, "wb");
+          if (f_rm) {
+            fwrite(rm_data, 1, sdslen(rm_data), f_rm);
+            fclose(f_rm);
+          }
+          sdsfree(page_path);
+          sdsfree(rm_data);
+
+          cJSON_AddItemToArray(pages_arr, cJSON_CreateString(page_uuid));
+
+          if (f_p) {
+            fputs("Blank\n", f_p);
+          }
+        }
+
+        if (f_p) {
+          fclose(f_p);
+        }
+        sdsfree(pagedata_path);
+
+        sds content_path = sdscatprintf(sdsempty(), "%s/%s.content", ctx->src_dir, doc_uuid);
+        FILE *f_c = fopen(content_path, "w");
+        if (f_c) {
+          char *str = cJSON_Print(content);
+          fputs(str, f_c);
+          free(str);
+          fclose(f_c);
+        }
+        sdsfree(content_path);
+        cJSON_Delete(content);
+      }
+      free_xoj_pages(pages, num_pages);
+
+      unlink(temp_path);
+      sdsfree(temp_path);
+    }
+
+    sdsfree(parent_path);
+    sdsfree(name);
+    pthread_mutex_unlock(&remfs_mutex);
+
+    remfs_reload(ctx);
+  }
+
   return 0;
 }
 
@@ -1526,6 +1966,8 @@ static int remfuse_create(const char *path, mode_t mode,
   bool is_pdf = (name_len >= 4 && strcmp(name + name_len - 4, ".pdf") == 0);
   bool is_epub = (name_len >= 5 && strcmp(name + name_len - 5, ".epub") == 0);
   bool is_rm = (name_len >= 3 && strcmp(name + name_len - 3, ".rm") == 0);
+  bool is_xoj = (name_len >= 4 && strcmp(name + name_len - 4, ".xoj") == 0) ||
+                (name_len >= 5 && strcmp(name + name_len - 5, ".xopp") == 0);
 
   if (is_rm) {
     if (!parent_node || parent_node->file->type != DOCUMENT ||
@@ -1603,6 +2045,29 @@ static int remfuse_create(const char *path, mode_t mode,
     pthread_mutex_unlock(&remfs_mutex);
 
     remfs_reload(ctx);
+    return 0;
+  } else if (is_xoj) {
+    if (parent_node && parent_node->file->type != COLLECTION) {
+      sdsfree(parent_path);
+      sdsfree(name);
+      pthread_mutex_unlock(&remfs_mutex);
+      return -ENOTDIR;
+    }
+
+    const char *parent_uuid = parent_node ? parent_node->file->uuid : "";
+    sds temp_path = sdscatprintf(sdsempty(), "%s/xojimport_%s_%s.tmp", ctx->src_dir,
+                                 parent_uuid, name);
+    int fd = open(temp_path, fi->flags | O_CREAT, mode);
+    sdsfree(temp_path);
+    sdsfree(parent_path);
+    sdsfree(name);
+
+    if (fd == -1) {
+      pthread_mutex_unlock(&remfs_mutex);
+      return -errno;
+    }
+    fi->fh = fd;
+    pthread_mutex_unlock(&remfs_mutex);
     return 0;
   } else if (is_pdf || is_epub) {
     if (parent_node && parent_node->file->type != COLLECTION) {

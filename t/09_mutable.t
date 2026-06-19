@@ -16,7 +16,7 @@ if (!$has_fuse) {
     plan skip_all => "FUSE is not available or writeable on this system";
 }
 
-plan tests => 8;
+plan tests => 10;
 
 # Setup temp directories
 my $tmp_dir = tempdir(CLEANUP => 1);
@@ -96,6 +96,19 @@ if ($epub_fh) {
     close($epub_fh);
 }
 ok(-f "$mnt_dir/my_novel.epub", "Imported EPUB file is visible");
+
+# Test 7: Import a XOJ file to create a new Notebook
+my $xoj_source = "./misc/rm_grid_template.xoj";
+my $xoj_dest = "$mnt_dir/import.xoj";
+copy($xoj_source, $xoj_dest) or warn "Could not copy XOJ: $!";
+
+# Wait a tiny bit for the import/write/release process
+sleep(0.2);
+
+# Verify that the new notebook directory and its page (.rm file) were created.
+ok(-d "$mnt_dir/import", "New notebook directory was created for imported XOJ");
+my @rm_files = glob("$mnt_dir/import/*.rm");
+is(scalar @rm_files, 1, "Imported XOJ file and verified the new notebook page was generated");
 
 # Clean up FUSE daemon
 kill('TERM', $pid);
