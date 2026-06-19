@@ -16,7 +16,17 @@ deps/plutovg/plutovg-rasterize.o\
 deps/plutovg/plutovg-surface.o\
 remfs.o\
 remfmt.o\
-pdfoverlay.o
+rm_parser.o\
+template_renderer.o\
+render_svg.o\
+render_png.o\
+render_pdf.o\
+render_xoj.o\
+pdfoverlay.o\
+cache.o\
+path_utils.o\
+generators.o\
+remfuse.o
 
 CPPFLAGS := -D_DEFAULT_SOURCE -D_FILE_OFFSET_BITS=64
 CFLAGS   := -O0 -g -std=c99 -Wall -I. -Ideps -Ideps/cJSON -Ideps/struct/include/struct -Ideps/plutovg

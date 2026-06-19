@@ -26,6 +26,28 @@ typedef enum {
   GRAYHL,
 } remfmt_stroke_color;
 
+typedef enum {
+  BRUSH = 0,
+  TILT_PENCIL = 1,
+  BALLPOINT = 2,
+  MARKER = 3,
+  FINELINER = 4,
+  HIGHLIGHTER = 5,
+  ERASER = 6,
+  SHARP_PENCIL = 7,
+  ERASE_AREA = 8,
+
+  BRUSH_V2 = 12,
+  SHARP_PENCIL_V2 = 13,
+  PENCIL_V2 = 14,
+  BALLPOINT_V2 = 15,
+  MARKER_V2 = 16,
+  FINELINER_V2 = 17,
+  HIGHLIGHTER_V2 = 18,
+  CALLIGRAPHY = 21,
+  SHADER = 23,
+} remfmt_pen;
+
 typedef struct {
   bool landscape;
   bool annotation;
@@ -75,22 +97,24 @@ typedef struct {
 
 typedef kvec_t(remfmt_stroke) remfmt_stroke_vec;
 
+// Common helpers and shared variables
+extern uint32_t svg_color[];
+extern const char rmv_magic[];
+
+void set_pen_attr(remfmt_stroke *st);
+float clampf(float f, float lo, float hi);
+float get_seg_width(remfmt_stroke *st, remfmt_seg *sg);
+float get_seg_alpha(remfmt_stroke *st, remfmt_seg *sg);
+unsigned map_v6_pen(unsigned pen_id);
+
 void remfmt_render_rm(FILE *stream, remfmt_stroke_vec *strokes);
-void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
-                       remfmt_render_params *prm);
-void remfmt_render_svg(FILE *stream, remfmt_stroke_vec *strokes,
-                       remfmt_render_params *prm);
-void remfmt_render_pdf(FILE *stream, remfmt_stroke_vec *strokes,
-                       remfmt_render_params *prm);
-void remfmt_render_xoj(FILE *stream, remfmt_stroke_vec *strokes,
-                       remfmt_render_params *prm);
-void remfmt_render_notebook_pdf(FILE *stream, int num_pages,
-                                remfmt_stroke_vec **pages_strokes,
-                                remfmt_render_params **pages_prms);
-void remfmt_render_notebook_xoj(FILE *stream, int num_pages,
-                                remfmt_stroke_vec **pages_strokes,
-                                remfmt_render_params **pages_prms);
-void remfmt_stroke_cleanup(remfmt_stroke_vec *strokes);
-remfmt_stroke_vec *remfmt_parse(const char *path);
+
+// Sub-modules
+#include "render_pdf.h"
+#include "render_png.h"
+#include "render_svg.h"
+#include "render_xoj.h"
+#include "rm_parser.h"
+#include "template_renderer.h"
 
 #endif
