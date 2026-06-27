@@ -28,8 +28,17 @@ path_utils.o\
 generators.o\
 remfuse.o
 
+HAS_FUSE3 := $(shell pkg-config --exists fuse3 && echo yes)
+ifeq ($(HAS_FUSE3),yes)
+    FUSE_CFLAGS := $(shell pkg-config --cflags fuse3) -DFUSE_USE_VERSION=31
+    FUSE_LIBS   := $(shell pkg-config --libs fuse3)
+else
+    FUSE_CFLAGS := $(shell pkg-config --cflags fuse) -DFUSE_USE_VERSION=26
+    FUSE_LIBS   := $(shell pkg-config --libs fuse)
+endif
+
 CPPFLAGS := -D_DEFAULT_SOURCE -D_FILE_OFFSET_BITS=64
-CFLAGS   := -O0 -g -std=c99 -Wall -I. -Ideps -Ideps/cJSON -Ideps/struct/include/struct -Ideps/plutovg
+CFLAGS   := -O0 -g -std=c99 -Wall -I. -Ideps -Ideps/cJSON -Ideps/struct/include/struct -Ideps/plutovg $(FUSE_CFLAGS)
 LDLIBS   := -lm -lpng -lz
 
 all: remfs remfmt pdfoverlay
@@ -38,7 +47,7 @@ libremfs.a: $(LIBOBJ)
 	$(AR) rcs $@ $^
 
 remfs: main.o libremfs.a
-	$(CC) $(LDFLAGS) -o $@ main.o libremfs.a $(LDLIBS) -lfuse
+	$(CC) $(LDFLAGS) -o $@ main.o libremfs.a $(LDLIBS) $(FUSE_LIBS)
 
 remfmt: remfmt_cli.o libremfs.a
 	$(CC) $(LDFLAGS) -o $@ remfmt_cli.o libremfs.a $(LDLIBS)

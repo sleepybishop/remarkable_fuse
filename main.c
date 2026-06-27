@@ -1,4 +1,6 @@
+#ifndef FUSE_USE_VERSION
 #define FUSE_USE_VERSION 26
+#endif
 #include <assert.h>
 #include <errno.h>
 #include <fuse.h>

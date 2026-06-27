@@ -127,5 +127,5 @@ void remfmt_render_svg(FILE *stream, remfmt_stroke_vec *strokes,
       sdsfree(pv);
     }
   }
-  fprintf(stream, svg_tpl[SVG_FOOTER]);
+  fprintf(stream, "%s", svg_tpl[SVG_FOOTER]);
 }

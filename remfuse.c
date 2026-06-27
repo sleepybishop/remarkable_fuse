@@ -1,9 +1,20 @@
+#ifndef FUSE_USE_VERSION
 #define FUSE_USE_VERSION 26
+#endif
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <fuse.h>
+
+#if FUSE_USE_VERSION >= 30
+#define FILL_DIR(filler_func, buffer, name, stbuf, off)                        \
+  filler_func(buffer, name, stbuf, off, 0)
+#else
+#define FILL_DIR(filler_func, buffer, name, stbuf, off)                        \
+  filler_func(buffer, name, stbuf, off)
+#endif
+
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -223,7 +234,7 @@ static void fill_fake_ext(void *buf, fuse_fill_dir_t filler, remfs_file *file,
                           const char *ext_str) {
   sds tmp = sdsnew(file->visible_name);
   tmp = sdscat(tmp, ext_str);
-  filler(buf, tmp, NULL, 0);
+  FILL_DIR(filler, buf, tmp, NULL, 0);
   sdsfree(tmp);
 }
 
@@ -231,12 +242,19 @@ static void fill_fake_folder(void *buf, fuse_fill_dir_t filler,
                              remfs_file *file) {
   sds tmp = sdsempty();
   tmp = sdscatprintf(tmp, "%s Annotations", file->visible_name);
-  filler(buf, tmp, NULL, 0);
+  FILL_DIR(filler, buf, tmp, NULL, 0);
   sdsfree(tmp);
 }
 
+#if FUSE_USE_VERSION >= 30
+static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+                           off_t offset, struct fuse_file_info *fi,
+                           enum fuse_readdir_flags readdir_flags) {
+  (void)readdir_flags;
+#else
 static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                            off_t offset, struct fuse_file_info *fi) {
+#endif
   struct fuse_context *fuse_ctx = fuse_get_context();
   remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
 
@@ -256,8 +274,8 @@ static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     return -ENOENT;
   }
 
-  filler(buf, ".", NULL, 0);
-  filler(buf, "..", NULL, 0);
+  FILL_DIR(filler, buf, ".", NULL, 0);
+  FILL_DIR(filler, buf, "..", NULL, 0);
 
   bool is_notebook_dir = false;
   bool is_annot_root_dir = false;
@@ -277,19 +295,19 @@ static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
   if (is_notebook_dir) {
     if (enable_svg)
-      filler(buf, "svg", NULL, 0);
+      FILL_DIR(filler, buf, "svg", NULL, 0);
     if (enable_png)
-      filler(buf, "png", NULL, 0);
+      FILL_DIR(filler, buf, "png", NULL, 0);
     if (enable_xoj)
-      filler(buf, "xoj", NULL, 0);
+      FILL_DIR(filler, buf, "xoj", NULL, 0);
   }
   if (is_annot_root_dir) {
     if (enable_svg)
-      filler(buf, "svg", NULL, 0);
+      FILL_DIR(filler, buf, "svg", NULL, 0);
     if (enable_png)
-      filler(buf, "png", NULL, 0);
+      FILL_DIR(filler, buf, "png", NULL, 0);
     if (enable_pdf)
-      filler(buf, "pdf", NULL, 0);
+      FILL_DIR(filler, buf, "pdf", NULL, 0);
   }
 
   for (size_t i = 0; i < kv_size(*n); i++) {
@@ -337,12 +355,12 @@ static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
       }
       sds tmp = sdsnew(s->file->visible_name);
       tmp = sdscat(tmp, s->file->filetype == PDF ? ".pdf" : ".epub");
-      filler(buf, tmp, NULL, 0);
+      FILL_DIR(filler, buf, tmp, NULL, 0);
       sdsfree(tmp);
       if (s->file->filetype == PDF) {
         sds tmp_annot = sdsnew(s->file->visible_name);
         tmp_annot = sdscat(tmp_annot, ".annotated.pdf");
-        filler(buf, tmp_annot, NULL, 0);
+        FILL_DIR(filler, buf, tmp_annot, NULL, 0);
         sdsfree(tmp_annot);
       }
     } else {
@@ -353,7 +371,7 @@ static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
         }
       }
       if (show_folder) {
-        filler(buf, s->file->visible_name, NULL, 0);
+        FILL_DIR(filler, buf, s->file->visible_name, NULL, 0);
       }
       if (s->file->filetype == NOTEBOOK && enable_pdf) {
         fill_fake_ext(buf, filler, s->file, ".pdf");
@@ -1247,7 +1265,13 @@ static int remfuse_utimens(const char *path, const struct timespec tv[2]) {
   return 0;
 }
 
+#if FUSE_USE_VERSION >= 30
+static void *remfuse_init(struct fuse_conn_info *conn,
+                          struct fuse_config *cfg) {
+  (void)cfg;
+#else
 static void *remfuse_init(struct fuse_conn_info *conn) {
+#endif
   const char *src = data_dir ? data_dir : DEFAULT_SOURCE;
   remfs_ctx *ctx = remfs_init(src);
   return ctx;
