@@ -67,7 +67,7 @@ void remfmt_render_pdf(FILE *stream, remfmt_stroke_vec *strokes,
       float seg_alpha = get_seg_alpha(&st, &kv_A(st.segments, 0));
       const char *gs_state = "/GS100";
       if (st.pen == ERASER || st.pen == ERASE_AREA) {
-        gs_state = "/GS100";
+        gs_state = "/GS0";
       } else {
         if (seg_alpha < 0.15) {
           gs_state = "/GS10";
@@ -139,7 +139,7 @@ void remfmt_render_pdf(FILE *stream, remfmt_stroke_vec *strokes,
   sds pdf = sdsempty();
   pdf = sdscat(pdf, "%PDF-1.4\n");
 
-  long offsets[6] = {0};
+  long offsets[7] = {0};
 
   offsets[1] = (long)sdslen(pdf);
   pdf = sdscat(pdf, "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
@@ -148,61 +148,76 @@ void remfmt_render_pdf(FILE *stream, remfmt_stroke_vec *strokes,
   pdf = sdscat(
       pdf, "2 0 obj\n<< /Type /Pages /Kids [ 3 0 R ] /Count 1 >>\nendobj\n");
 
+  const char *res_str =
+      "/GS0 << /Type /ExtGState /ca 0.00 /CA 0.00 >> /GS25 << /Type /ExtGState "
+      "/ca 0.25 /CA 0.25 >> "
+      "/GS90 << /Type /ExtGState /ca 0.90 /CA 0.90 >> /GS10 << /Type "
+      "/ExtGState /ca 0.10 /CA 0.10 >> /GS100 << /Type /ExtGState /ca 1.00 "
+      "/CA 1.00 >>";
+
   offsets[3] = (long)sdslen(pdf);
   if (tdata) {
-    pdf = sdscatprintf(
-        pdf,
-        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [ 0 0 %d "
-        "%d ] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 "
-        "R >> /ExtGState << /GS25 << /Type /ExtGState /ca 0.25 /CA 0.25 >> "
-        "/GS90 << /Type /ExtGState /ca 0.90 /CA 0.90 >> /GS10 << /Type "
-        "/ExtGState /ca 0.10 /CA 0.10 >> /GS100 << /Type /ExtGState /ca 1.00 "
-        "/CA 1.00 >> >> >> >>\nendobj\n",
-        width, height);
+    pdf =
+        sdscatprintf(pdf,
+                     "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [ 0 0 %d "
+                     "%d ] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 "
+                     "R /Fm1 6 0 R >> "
+                     "/ExtGState << %s >> >> >>\nendobj\n",
+                     width, height, res_str);
   } else {
     pdf = sdscatprintf(
         pdf,
         "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [ 0 0 %d "
-        "%d ] /Contents 4 0 R /Resources << /ExtGState << /GS25 << /Type "
-        "/ExtGState /ca 0.25 /CA 0.25 >> /GS90 << /Type /ExtGState /ca 0.90 "
-        "/CA 0.90 >> /GS10 << /Type /ExtGState /ca 0.10 /CA 0.10 >> /GS100 << "
-        "/Type /ExtGState /ca 1.00 /CA 1.00 >> >> >> >>\nendobj\n",
-        width, height);
+        "%d ] /Contents 4 0 R /Resources << /XObject << /Fm1 5 0 R >> "
+        "/ExtGState << %s >> >> >>\nendobj\n",
+        width, height, res_str);
   }
 
   offsets[4] = (long)sdslen(pdf);
 
+  sds page_content = sdsempty();
   if (tdata) {
-    sds bg = sdsempty();
     if (prm && prm->landscape) {
-      bg = sdscatprintf(bg, "q\n0 %d -%d 0 %d 0 cm\n/Im1 Do\nQ\n", height,
-                        width, width);
+      page_content =
+          sdscatprintf(page_content, "q\n0 %d -%d 0 %d 0 cm\n/Im1 Do\nQ\n",
+                       height, width, width);
     } else {
-      bg = sdscatprintf(bg, "q\n%d 0 0 %d 0 0 cm\n/Im1 Do\nQ\n", width, height);
+      page_content = sdscatprintf(
+          page_content, "q\n%d 0 0 %d 0 0 cm\n/Im1 Do\nQ\n", width, height);
     }
-    bg = sdscatsds(bg, pdf_content);
-    sdsfree(pdf_content);
-    pdf_content = bg;
   }
+  page_content = sdscatprintf(page_content, "q\n/Fm1 Do\nQ\n");
 
   pdf = sdscatprintf(
       pdf, "4 0 obj\n<< /Length %ld >>\nstream\n%s\nendstream\nendobj\n",
-      (long)sdslen(pdf_content), pdf_content);
+      (long)sdslen(page_content), page_content);
+  sdsfree(page_content);
 
+  int next_obj = 5;
   if (tdata) {
-    offsets[5] = (long)sdslen(pdf);
+    offsets[next_obj] = (long)sdslen(pdf);
     pdf = sdscatprintf(
         pdf,
-        "5 0 obj\n<< /Type /XObject /Subtype /Image /Width %d /Height %d "
+        "%d 0 obj\n<< /Type /XObject /Subtype /Image /Width %d /Height %d "
         "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Length %ld >>\nstream\n",
-        tw, th, (long)(tw * th * 3));
+        next_obj, tw, th, (long)(tw * th * 3));
     pdf = sdscatlen(pdf, (const char *)tdata, tw * th * 3);
     pdf = sdscat(pdf, "\nendstream\nendobj\n");
     free(tdata);
+    next_obj++;
   }
 
+  offsets[next_obj] = (long)sdslen(pdf);
+  pdf = sdscatprintf(
+      pdf,
+      "%d 0 obj\n<< /Type /XObject /Subtype /Form /BBox [ 0 0 %d %d ] "
+      "/Group << /S /Transparency /K true >> /Resources << /ExtGState << %s >> "
+      ">> /Length %ld >>\nstream\n%s\nendstream\nendobj\n",
+      next_obj, width, height, res_str, (long)sdslen(pdf_content), pdf_content);
+  next_obj++;
+
   long xref_pos = (long)sdslen(pdf);
-  int num_objs = tdata ? 6 : 5;
+  int num_objs = next_obj;
   pdf = sdscatprintf(pdf, "xref\n0 %d\n", num_objs);
   pdf = sdscat(pdf, "0000000000 65535 f \n");
   for (int i = 1; i < num_objs; i++) {
@@ -233,6 +248,7 @@ void remfmt_render_notebook_pdf(FILE *stream, int num_pages,
 
   int *page_obj_ids = malloc(num_pages * sizeof(int));
   int *contents_obj_ids = malloc(num_pages * sizeof(int));
+  int *form_obj_ids = malloc(num_pages * sizeof(int));
   int *page_template_obj_ids = calloc(num_pages, sizeof(int));
 
   unique_template *utemplates = calloc(num_pages, sizeof(unique_template));
@@ -276,6 +292,7 @@ void remfmt_render_notebook_pdf(FILE *stream, int num_pages,
   for (int i = 0; i < num_pages; i++) {
     page_obj_ids[i] = next_id++;
     contents_obj_ids[i] = next_id++;
+    form_obj_ids[i] = next_id++;
   }
 
   for (int j = 0; j < num_utemplates; j++) {
@@ -379,12 +396,16 @@ void remfmt_render_notebook_pdf(FILE *stream, int num_pages,
 
         float seg_alpha = get_seg_alpha(&st, &kv_A(st.segments, 0));
         const char *gs_state = "/GS100";
-        if (seg_alpha < 0.15) {
-          gs_state = "/GS10";
-        } else if (seg_alpha < 0.35) {
-          gs_state = "/GS25";
-        } else if (seg_alpha < 0.95) {
-          gs_state = "/GS90";
+        if (st.pen == ERASER || st.pen == ERASE_AREA) {
+          gs_state = "/GS0";
+        } else {
+          if (seg_alpha < 0.15) {
+            gs_state = "/GS10";
+          } else if (seg_alpha < 0.35) {
+            gs_state = "/GS25";
+          } else if (seg_alpha < 0.95) {
+            gs_state = "/GS90";
+          }
         }
 
         pdf_content = sdscatprintf(pdf_content, "q\n");
@@ -438,47 +459,59 @@ void remfmt_render_notebook_pdf(FILE *stream, int num_pages,
       }
     }
 
+    const char *res_str =
+        "/GS0 << /Type /ExtGState /ca 0.00 /CA 0.00 >> /GS25 << /Type "
+        "/ExtGState /ca 0.25 /CA 0.25 >> "
+        "/GS90 << /Type /ExtGState /ca 0.90 /CA 0.90 >> /GS10 << /Type "
+        "/ExtGState /ca 0.10 /CA 0.10 >> /GS100 << /Type /ExtGState /ca 1.00 "
+        "/CA 1.00 >>";
+
     offsets[page_obj_ids[i]] = (long)sdslen(pdf);
     if (page_template_obj_ids[i] != 0) {
       pdf = sdscatprintf(
           pdf,
           "%d 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [ 0 0 %d "
-          "%d ] /Contents %d 0 R /Resources << /XObject << /Im1 %d 0 "
-          "R >> /ExtGState << /GS25 << /Type /ExtGState /ca 0.25 /CA 0.25 >> "
-          "/GS90 << /Type /ExtGState /ca 0.90 /CA 0.90 >> /GS10 << /Type "
-          "/ExtGState /ca 0.10 /CA 0.10 >> /GS100 << /Type /ExtGState /ca 1.00 "
-          "/CA 1.00 >> >> >> >>\nendobj\n",
+          "%d ] /Contents %d 0 R /Resources << /XObject << /Im1 %d 0 R /Fm1 %d "
+          "0 R >> /ExtGState << %s >> >> >>\nendobj\n",
           page_obj_ids[i], width, height, contents_obj_ids[i],
-          page_template_obj_ids[i]);
+          page_template_obj_ids[i], form_obj_ids[i], res_str);
     } else {
       pdf = sdscatprintf(
           pdf,
           "%d 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [ 0 0 %d "
-          "%d ] /Contents %d 0 R /Resources << /ExtGState << /GS25 << /Type "
-          "/ExtGState /ca 0.25 /CA 0.25 >> /GS90 << /Type /ExtGState /ca 0.90 "
-          "/CA 0.90 >> /GS10 << /Type /ExtGState /ca 0.10 /CA 0.10 >> /GS100 "
-          "<< /Type /ExtGState /ca 1.00 /CA 1.00 >> >> >> >>\nendobj\n",
-          page_obj_ids[i], width, height, contents_obj_ids[i]);
+          "%d ] /Contents %d 0 R /Resources << /XObject << /Fm1 %d 0 R >> "
+          "/ExtGState << %s >> >> >>\nendobj\n",
+          page_obj_ids[i], width, height, contents_obj_ids[i], form_obj_ids[i],
+          res_str);
     }
 
     offsets[contents_obj_ids[i]] = (long)sdslen(pdf);
+    sds page_content = sdsempty();
     if (page_template_obj_ids[i] != 0) {
-      sds bg = sdsempty();
       if (prm && prm->landscape) {
-        bg = sdscatprintf(bg, "q\n0 %d -%d 0 %d 0 cm\n/Im1 Do\nQ\n", height,
-                          width, width);
+        page_content =
+            sdscatprintf(page_content, "q\n0 %d -%d 0 %d 0 cm\n/Im1 Do\nQ\n",
+                         height, width, width);
       } else {
-        bg = sdscatprintf(bg, "q\n%d 0 0 %d 0 0 cm\n/Im1 Do\nQ\n", width,
-                          height);
+        page_content = sdscatprintf(
+            page_content, "q\n%d 0 0 %d 0 0 cm\n/Im1 Do\nQ\n", width, height);
       }
-      bg = sdscatsds(bg, pdf_content);
-      sdsfree(pdf_content);
-      pdf_content = bg;
     }
+    page_content = sdscatprintf(page_content, "q\n/Fm1 Do\nQ\n");
 
     pdf = sdscatprintf(
         pdf, "%d 0 obj\n<< /Length %ld >>\nstream\n%s\nendstream\nendobj\n",
-        contents_obj_ids[i], (long)sdslen(pdf_content), pdf_content);
+        contents_obj_ids[i], (long)sdslen(page_content), page_content);
+    sdsfree(page_content);
+
+    offsets[form_obj_ids[i]] = (long)sdslen(pdf);
+    pdf = sdscatprintf(
+        pdf,
+        "%d 0 obj\n<< /Type /XObject /Subtype /Form /BBox [ 0 0 %d %d ] "
+        "/Group << /S /Transparency /K true >> /Resources << /ExtGState << %s "
+        ">> >> /Length %ld >>\nstream\n%s\nendstream\nendobj\n",
+        form_obj_ids[i], width, height, res_str, (long)sdslen(pdf_content),
+        pdf_content);
     sdsfree(pdf_content);
   }
 
@@ -518,6 +551,7 @@ void remfmt_render_notebook_pdf(FILE *stream, int num_pages,
 
   free(page_obj_ids);
   free(contents_obj_ids);
+  free(form_obj_ids);
   free(page_template_obj_ids);
   free(offsets);
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env perl
 use strict;
 use warnings;
-use Test::More tests => 7;
+use Test::More tests => 8;
 use File::Temp qw(tempfile);
 
 # Check if remfmt binary exists
@@ -60,5 +60,6 @@ like($svg_out, qr/opacity:1\.000/i, 'SVG output renders eraser with 1.0 opacity'
 # Render to PDF and check
 my $pdf_out = `./remfmt "$filename" pdf`;
 is($?, 0, 'rendering to pdf succeeds');
-like($pdf_out, qr/\/GS100 gs/m, 'PDF output uses GS100 (100% opacity) for eraser');
+like($pdf_out, qr/\/GS0 gs/m, 'PDF output uses GS0 (0% opacity) for eraser knockout');
 like($pdf_out, qr/1\.000 1\.000 1\.000 RG/m, 'PDF output draws white color for eraser');
+like($pdf_out, qr/\/Group << \/S \/Transparency \/K true >>/m, 'PDF output includes Knockout Group for strokes');
