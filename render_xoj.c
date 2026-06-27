@@ -46,10 +46,15 @@ static void render_xoj_page(gzFile gf, remfmt_stroke_vec *strokes,
           color_str = "red";
       }
 
+      unsigned pen_type = st.pen;
+      if (st.version == 6) {
+        pen_type = map_v6_pen(pen_type);
+      }
+
       const char *tool_str = "pen";
-      if (st.pen == 5 || st.pen == 15)
+      if (pen_type == HIGHLIGHTER || pen_type == HIGHLIGHTER_V2)
         tool_str = "highlighter";
-      else if (st.pen == 6 || st.pen == 7)
+      else if (pen_type == ERASER || pen_type == ERASE_AREA)
         tool_str = "eraser";
 
       float width = st.calc_width * 1.5f;
