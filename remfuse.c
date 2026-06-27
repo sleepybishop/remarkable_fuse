@@ -7,14 +7,6 @@
 #include <fcntl.h>
 #include <fuse.h>
 
-#if FUSE_USE_VERSION >= 30
-#define FILL_DIR(filler_func, buffer, name, stbuf, off)                        \
-  filler_func(buffer, name, stbuf, off, 0)
-#else
-#define FILL_DIR(filler_func, buffer, name, stbuf, off)                        \
-  filler_func(buffer, name, stbuf, off)
-#endif
-
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,13 +34,11 @@ char *data_dir = NULL;
 
 pthread_mutex_t remfs_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static int remfuse_getattr(const char *path, struct stat *stbuf) {
+static int remfuse_getattr_internal(remfs_ctx *ctx, const char *path,
+                                    struct stat *stbuf) {
   int ret = -ENOENT;
-  struct fuse_context *fuse_ctx = fuse_get_context();
-  remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
   memset(stbuf, 0, sizeof(struct stat));
   int flags = 0;
-  pthread_mutex_lock(&remfs_mutex);
   size_t len = strlen(path);
   bool is_xoj = (len >= 4 && strcmp(path + len - 4, ".xoj") == 0) ||
                 (len >= 5 && strcmp(path + len - 5, ".xopp") == 0);
@@ -226,25 +216,59 @@ static int remfuse_getattr(const char *path, struct stat *stbuf) {
     }
     stbuf->st_mode |= 0400;
   }
+  return ret;
+}
+
+static int remfuse_getattr(const char *path, struct stat *stbuf) {
+  struct fuse_context *fuse_ctx = fuse_get_context();
+  remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
+  pthread_mutex_lock(&remfs_mutex);
+  int ret = remfuse_getattr_internal(ctx, path, stbuf);
   pthread_mutex_unlock(&remfs_mutex);
   return ret;
 }
 
-static void fill_fake_ext(void *buf, fuse_fill_dir_t filler, remfs_file *file,
-                          const char *ext_str) {
-  sds tmp = sdsnew(file->visible_name);
-  tmp = sdscat(tmp, ext_str);
-  FILL_DIR(filler, buf, tmp, NULL, 0);
-  sdsfree(tmp);
+#if FUSE_USE_VERSION >= 30
+static int my_fill_dir(remfs_ctx *ctx, const char *parent_path, void *buf,
+                       fuse_fill_dir_t filler, const char *name,
+                       enum fuse_readdir_flags flags) {
+  if (flags & FUSE_READDIR_PLUS) {
+    struct stat st;
+    sds full_path;
+    if (strcmp(parent_path, "/") == 0) {
+      full_path = sdscatprintf(sdsempty(), "/%s", name);
+    } else {
+      full_path = sdscatprintf(sdsempty(), "%s/%s", parent_path, name);
+    }
+    if (remfuse_getattr_internal(ctx, full_path, &st) == 0) {
+      sdsfree(full_path);
+      return filler(buf, name, &st, 0, FUSE_FILL_DIR_PLUS);
+    }
+    sdsfree(full_path);
+  }
+  return filler(buf, name, NULL, 0, 0);
 }
+#define DO_FILL_DIR(name)                                                      \
+  my_fill_dir(ctx, path, buf, filler, name, readdir_flags)
+#else
+#define DO_FILL_DIR(name) filler(buf, name, NULL, 0)
+#endif
 
-static void fill_fake_folder(void *buf, fuse_fill_dir_t filler,
-                             remfs_file *file) {
-  sds tmp = sdsempty();
-  tmp = sdscatprintf(tmp, "%s Annotations", file->visible_name);
-  FILL_DIR(filler, buf, tmp, NULL, 0);
-  sdsfree(tmp);
-}
+#define FILL_FAKE_EXT(file, ext_str)                                           \
+  do {                                                                         \
+    sds tmp = sdsnew((file)->visible_name);                                    \
+    tmp = sdscat(tmp, ext_str);                                                \
+    DO_FILL_DIR(tmp);                                                          \
+    sdsfree(tmp);                                                              \
+  } while (0)
+
+#define FILL_FAKE_FOLDER(file)                                                 \
+  do {                                                                         \
+    sds tmp = sdsempty();                                                      \
+    tmp = sdscatprintf(tmp, "%s Annotations", (file)->visible_name);           \
+    DO_FILL_DIR(tmp);                                                          \
+    sdsfree(tmp);                                                              \
+  } while (0)
 
 #if FUSE_USE_VERSION >= 30
 static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
@@ -274,8 +298,8 @@ static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     return -ENOENT;
   }
 
-  FILL_DIR(filler, buf, ".", NULL, 0);
-  FILL_DIR(filler, buf, "..", NULL, 0);
+  DO_FILL_DIR(".");
+  DO_FILL_DIR("..");
 
   bool is_notebook_dir = false;
   bool is_annot_root_dir = false;
@@ -295,19 +319,19 @@ static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
   if (is_notebook_dir) {
     if (enable_svg)
-      FILL_DIR(filler, buf, "svg", NULL, 0);
+      DO_FILL_DIR("svg");
     if (enable_png)
-      FILL_DIR(filler, buf, "png", NULL, 0);
+      DO_FILL_DIR("png");
     if (enable_xoj)
-      FILL_DIR(filler, buf, "xoj", NULL, 0);
+      DO_FILL_DIR("xoj");
   }
   if (is_annot_root_dir) {
     if (enable_svg)
-      FILL_DIR(filler, buf, "svg", NULL, 0);
+      DO_FILL_DIR("svg");
     if (enable_png)
-      FILL_DIR(filler, buf, "png", NULL, 0);
+      DO_FILL_DIR("png");
     if (enable_pdf)
-      FILL_DIR(filler, buf, "pdf", NULL, 0);
+      DO_FILL_DIR("pdf");
   }
 
   for (size_t i = 0; i < kv_size(*n); i++) {
@@ -328,39 +352,39 @@ static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
       }
       if (flags & IS_SVG_DIR) {
         if (enable_svg) {
-          fill_fake_ext(buf, filler, s->file, ".svg");
+          FILL_FAKE_EXT(s->file, ".svg");
         }
       } else if (flags & IS_PNG_DIR) {
         if (enable_png) {
-          fill_fake_ext(buf, filler, s->file, ".png");
+          FILL_FAKE_EXT(s->file, ".png");
         }
       } else if (flags & IS_PDF_DIR) {
         if (enable_pdf) {
-          fill_fake_ext(buf, filler, s->file, ".pdf");
+          FILL_FAKE_EXT(s->file, ".pdf");
         }
       } else if (flags & IS_XOJ_DIR) {
         if (enable_xoj) {
-          fill_fake_ext(buf, filler, s->file, ".xoj");
+          FILL_FAKE_EXT(s->file, ".xoj");
         }
       } else {
         if (!(flags & IS_ANNOT_DIR)) {
           if (enable_mutable) {
-            fill_fake_ext(buf, filler, s->file, ".rm");
+            FILL_FAKE_EXT(s->file, ".rm");
           }
         }
       }
     } else if (s->file->filetype == PDF || s->file->filetype == EPUB) {
       if (enable_standalone_annotations) {
-        fill_fake_folder(buf, filler, s->file);
+        FILL_FAKE_FOLDER(s->file);
       }
       sds tmp = sdsnew(s->file->visible_name);
       tmp = sdscat(tmp, s->file->filetype == PDF ? ".pdf" : ".epub");
-      FILL_DIR(filler, buf, tmp, NULL, 0);
+      DO_FILL_DIR(tmp);
       sdsfree(tmp);
       if (s->file->filetype == PDF) {
         sds tmp_annot = sdsnew(s->file->visible_name);
         tmp_annot = sdscat(tmp_annot, ".annotated.pdf");
-        FILL_DIR(filler, buf, tmp_annot, NULL, 0);
+        DO_FILL_DIR(tmp_annot);
         sdsfree(tmp_annot);
       }
     } else {
@@ -371,10 +395,10 @@ static int remfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
         }
       }
       if (show_folder) {
-        FILL_DIR(filler, buf, s->file->visible_name, NULL, 0);
+        DO_FILL_DIR(s->file->visible_name);
       }
       if (s->file->filetype == NOTEBOOK && enable_pdf) {
-        fill_fake_ext(buf, filler, s->file, ".pdf");
+        FILL_FAKE_EXT(s->file, ".pdf");
       }
     }
   }
