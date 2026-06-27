@@ -233,9 +233,10 @@ static void write_png_to_stream(FILE *stream, canvas_pixel *canvas, int width,
   free(u_buf);
 }
 
-static void draw_circle(canvas_pixel *canvas, uint8_t *mask, int width,
-                        int height, float x, float y, float r,
-                        uint32_t stroke_color, float alpha, bool is_eraser) {
+static void draw_circle(canvas_pixel *canvas, canvas_pixel *bg_canvas,
+                        uint8_t *mask, int width, int height, float x, float y,
+                        float r, uint32_t stroke_color, float alpha,
+                        bool is_eraser) {
   float min_x = x - r - 1.0f;
   float max_x = x + r + 1.0f;
   float min_y = y - r - 1.0f;
@@ -293,7 +294,19 @@ static void draw_circle(canvas_pixel *canvas, uint8_t *mask, int width,
           canvas_pixel *pixel = &canvas[idx];
 
           if (is_eraser) {
-            pixel->a = (uint8_t)(pixel->a * (1.0f - final_alpha) + 0.5f);
+            if (bg_canvas) {
+              canvas_pixel bg_p = bg_canvas[idx];
+              pixel->r = (uint8_t)(pixel->r * (1.0f - final_alpha) +
+                                   bg_p.r * final_alpha + 0.5f);
+              pixel->g = (uint8_t)(pixel->g * (1.0f - final_alpha) +
+                                   bg_p.g * final_alpha + 0.5f);
+              pixel->b = (uint8_t)(pixel->b * (1.0f - final_alpha) +
+                                   bg_p.b * final_alpha + 0.5f);
+              pixel->a = (uint8_t)(pixel->a * (1.0f - final_alpha) +
+                                   bg_p.a * final_alpha + 0.5f);
+            } else {
+              pixel->a = (uint8_t)(pixel->a * (1.0f - final_alpha) + 0.5f);
+            }
           } else {
             float dst_a = pixel->a / 255.0f;
             float out_a = final_alpha + dst_a * (1.0f - final_alpha);
@@ -319,10 +332,10 @@ static void draw_circle(canvas_pixel *canvas, uint8_t *mask, int width,
   }
 }
 
-static void draw_segment(canvas_pixel *canvas, uint8_t *mask, int width,
-                         int height, float x1, float y1, float x2, float y2,
-                         float r, uint32_t stroke_color, float alpha,
-                         bool is_eraser) {
+static void draw_segment(canvas_pixel *canvas, canvas_pixel *bg_canvas,
+                         uint8_t *mask, int width, int height, float x1,
+                         float y1, float x2, float y2, float r,
+                         uint32_t stroke_color, float alpha, bool is_eraser) {
   float dx = x2 - x1;
   float dy = y2 - y1;
   float l2 = dx * dx + dy * dy;
@@ -395,7 +408,19 @@ static void draw_segment(canvas_pixel *canvas, uint8_t *mask, int width,
           canvas_pixel *pixel = &canvas[idx];
 
           if (is_eraser) {
-            pixel->a = (uint8_t)(pixel->a * (1.0f - final_alpha) + 0.5f);
+            if (bg_canvas) {
+              canvas_pixel bg_p = bg_canvas[idx];
+              pixel->r = (uint8_t)(pixel->r * (1.0f - final_alpha) +
+                                   bg_p.r * final_alpha + 0.5f);
+              pixel->g = (uint8_t)(pixel->g * (1.0f - final_alpha) +
+                                   bg_p.g * final_alpha + 0.5f);
+              pixel->b = (uint8_t)(pixel->b * (1.0f - final_alpha) +
+                                   bg_p.b * final_alpha + 0.5f);
+              pixel->a = (uint8_t)(pixel->a * (1.0f - final_alpha) +
+                                   bg_p.a * final_alpha + 0.5f);
+            } else {
+              pixel->a = (uint8_t)(pixel->a * (1.0f - final_alpha) + 0.5f);
+            }
           } else {
             float dst_a = pixel->a / 255.0f;
             float out_a = final_alpha + dst_a * (1.0f - final_alpha);
@@ -505,6 +530,15 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
     }
   }
 
+  canvas_pixel *bg_canvas = NULL;
+  if (prm && !prm->annotation) {
+    bg_canvas = malloc((size_t)width * (size_t)height * sizeof(canvas_pixel));
+    if (bg_canvas) {
+      memcpy(bg_canvas, canvas,
+             (size_t)width * (size_t)height * sizeof(canvas_pixel));
+    }
+  }
+
   if (strokes != NULL) {
     for (int i = 0; i < kv_size(*strokes); i++) {
       remfmt_stroke *st = &kv_A(*strokes, i);
@@ -591,9 +625,8 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
         if (r < 0.5f)
           r = 0.5f;
 
-        draw_circle(canvas, is_hl ? mask : NULL, width, height, x, y, r,
-                    stroke_color, bm.alpha,
-                    is_eraser && prm && prm->annotation);
+        draw_circle(canvas, bg_canvas, is_hl ? mask : NULL, width, height, x, y,
+                    r, stroke_color, bm.alpha, is_eraser);
       } else {
         for (int j = 1; j < num_points; j++) {
           remfmt_seg prev = kv_A(st->segments, j - 1);
@@ -622,9 +655,8 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
 
           float r = segWidth / 2.0f;
 
-          draw_segment(canvas, is_hl ? mask : NULL, width, height, x1, y1, x2,
-                       y2, r, stroke_color, bm.alpha,
-                       is_eraser && prm && prm->annotation);
+          draw_segment(canvas, bg_canvas, is_hl ? mask : NULL, width, height,
+                       x1, y1, x2, y2, r, stroke_color, bm.alpha, is_eraser);
         }
       }
 
