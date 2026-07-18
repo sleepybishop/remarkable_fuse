@@ -44,6 +44,38 @@ void remfmt_render_pdf(FILE *stream, remfmt_stroke_vec *strokes,
     for (int i = 0; i < kv_size(*strokes); i++) {
       remfmt_stroke st = kv_A(*strokes, i);
       set_pen_attr(&st);
+
+      if (st.pen == 99) { /* PEN_IMAGE */
+        if (kv_size(st.segments) > 0) {
+          remfmt_seg first_sg = kv_A(st.segments, 0);
+          float xOffset = (st.version == 6) ? ((float)DEV_W / 2.0f) : 0.0f;
+          float left = first_sg.x + xOffset - min_x;
+          float top = first_sg.y - min_y;
+          float w = first_sg.width;
+          float h = first_sg.pressure;
+
+          float x_pdf = left;
+          float y_pdf = (float)height - (top + h);
+          float w_pdf = w;
+          float h_pdf = h;
+
+          if (prm && prm->landscape) {
+            x_pdf = (float)port_h - (top + h);
+            y_pdf = (float)height - (left + w);
+            w_pdf = h;
+            h_pdf = w;
+          }
+
+          pdf_content = sdscatprintf(pdf_content, "q\n");
+          pdf_content = sdscatprintf(pdf_content, "0.5 0.5 0.5 RG\n");
+          pdf_content = sdscatprintf(pdf_content, "1 w\n");
+          pdf_content = sdscatprintf(pdf_content, "%.3f %.3f %.3f %.3f re\n",
+                                     x_pdf, y_pdf, w_pdf, h_pdf);
+          pdf_content = sdscatprintf(pdf_content, "S\nQ\n");
+        }
+        continue;
+      }
+
       int num_points = kv_size(st.segments);
       if (num_points == 0)
         continue;
@@ -376,6 +408,38 @@ void remfmt_render_notebook_pdf(FILE *stream, int num_pages,
       for (int k = 0; k < kv_size(*strokes); k++) {
         remfmt_stroke st = kv_A(*strokes, k);
         set_pen_attr(&st);
+
+        if (st.pen == 99) { /* PEN_IMAGE */
+          if (kv_size(st.segments) > 0) {
+            remfmt_seg first_sg = kv_A(st.segments, 0);
+            float xOffset = (st.version == 6) ? ((float)DEV_W / 2.0f) : 0.0f;
+            float left = first_sg.x + xOffset - min_x;
+            float top = first_sg.y - min_y;
+            float w = first_sg.width;
+            float h = first_sg.pressure;
+
+            float x_pdf = left;
+            float y_pdf = (float)height - (top + h);
+            float w_pdf = w;
+            float h_pdf = h;
+
+            if (prm && prm->landscape) {
+              x_pdf = (float)port_h - (top + h);
+              y_pdf = (float)height - (left + w);
+              w_pdf = h;
+              h_pdf = w;
+            }
+
+            pdf_content = sdscatprintf(pdf_content, "q\n");
+            pdf_content = sdscatprintf(pdf_content, "0.5 0.5 0.5 RG\n");
+            pdf_content = sdscatprintf(pdf_content, "1 w\n");
+            pdf_content = sdscatprintf(pdf_content, "%.3f %.3f %.3f %.3f re\n",
+                                       x_pdf, y_pdf, w_pdf, h_pdf);
+            pdf_content = sdscatprintf(pdf_content, "S\nQ\n");
+          }
+          continue;
+        }
+
         int num_points = kv_size(st.segments);
         if (num_points == 0)
           continue;

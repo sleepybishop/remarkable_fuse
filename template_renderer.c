@@ -645,7 +645,7 @@ static unsigned char *render_json_template_to_rgb(const char *json_str,
   return rgb_data;
 }
 
-static unsigned char *load_png_template(const char *filename, int *w, int *h) {
+unsigned char *load_png_template(const char *filename, int *w, int *h) {
   FILE *fp = fopen(filename, "rb");
   if (!fp)
     return NULL;

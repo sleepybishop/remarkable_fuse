@@ -322,10 +322,149 @@ static void parse_scene_glyph_item(rm_buf *b, uint32_t version,
   }
 }
 
+typedef struct {
+  uint8_t uuid[16];
+  char *filename;
+} remfmt_asset_mapping;
+typedef kvec_t(remfmt_asset_mapping) remfmt_asset_mapping_vec;
+
+static void parse_scene_path_item(rm_buf *b, uint8_t version,
+                                  remfmt_stroke_vec *strokes,
+                                  size_t block_body_pos, uint32_t block_length,
+                                  remfmt_asset_mapping_vec *assets) {
+  uint8_t p1;
+  uint64_t p2;
+
+  if (!read_tag(b, 1, TAG_TYPE_ID))
+    return;
+  read_crdt_id(b, &p1, &p2);
+
+  if (!read_tag(b, 2, TAG_TYPE_ID))
+    return;
+  read_crdt_id(b, &p1, &p2);
+
+  if (!read_tag(b, 3, TAG_TYPE_ID))
+    return;
+  read_crdt_id(b, &p1, &p2);
+
+  if (!read_tag(b, 4, TAG_TYPE_ID))
+    return;
+  read_crdt_id(b, &p1, &p2);
+
+  if (!read_tag(b, 5, TAG_TYPE_BYTE4))
+    return;
+  read_uint32(b);
+
+  if (check_tag(b, 6, TAG_TYPE_LENGTH4)) {
+    read_tag(b, 6, TAG_TYPE_LENGTH4);
+    uint32_t subblock_len = read_uint32(b);
+    size_t subblock_start = b->pos;
+
+    uint8_t item_type = read_uint8(b);
+    if (item_type == 0x07) { /* image item */
+      uint8_t img_uuid[16];
+      memset(img_uuid, 0, 16);
+      bool has_uuid = false;
+
+      /* read LWW bytes tag 1 (UUID) */
+      if (check_tag(b, 1, TAG_TYPE_LENGTH4)) {
+        read_tag(b, 1, TAG_TYPE_LENGTH4);
+        uint32_t lww_len = read_uint32(b);
+        size_t lww_start = b->pos;
+
+        /* inside LWW bytes: tag 1 (id), tag 2 (length4 bytes) */
+        if (read_tag(b, 1, TAG_TYPE_ID)) {
+          read_crdt_id(b, &p1, &p2);
+        }
+        if (check_tag(b, 2, TAG_TYPE_LENGTH4)) {
+          read_tag(b, 2, TAG_TYPE_LENGTH4);
+          uint32_t bytes_len = read_uint32(b);
+          if (bytes_len == 16) {
+            for (int j = 0; j < 16; j++) {
+              img_uuid[j] = read_uint8(b);
+            }
+            has_uuid = true;
+          }
+        }
+        b->pos = lww_start + lww_len;
+      }
+
+      /* read tag 2 (id) */
+      if (read_tag(b, 2, TAG_TYPE_ID)) {
+        read_crdt_id(b, &p1, &p2);
+      }
+
+      /* read tag 3 (vertices) */
+      float left = 0.0f, top = 0.0f, width = 0.0f, height = 0.0f;
+      bool has_vertices = false;
+      if (check_tag(b, 3, TAG_TYPE_LENGTH4)) {
+        read_tag(b, 3, TAG_TYPE_LENGTH4);
+        uint32_t sub_len = read_uint32(b);
+        size_t sub_start = b->pos;
+
+        uint64_t num_floats = read_varuint(b);
+        if (num_floats == 16) {
+          float v[16];
+          for (int j = 0; j < 16; j++) {
+            v[j] = read_float32(b);
+          }
+          left = v[0];
+          top = v[1];
+          width = v[4] - v[0];
+          height = v[9] - v[1];
+          has_vertices = true;
+        }
+        b->pos = sub_start + sub_len;
+      }
+
+      if (has_uuid && has_vertices) {
+        /* find filename corresponding to uuid */
+        char *filename = NULL;
+        for (int j = 0; j < kv_size(*assets); j++) {
+          if (memcmp(kv_A(*assets, j).uuid, img_uuid, 16) == 0) {
+            filename = kv_A(*assets, j).filename;
+            break;
+          }
+        }
+
+        if (filename != NULL) {
+          /* found filename, create synthetic stroke */
+          remfmt_stroke st = {0};
+          st.version = 6;
+          st.pen = 99; /* PEN_IMAGE */
+          st.color = 0;
+          st.width = width;
+          st.layer = 0;
+          st.has_custom_color = false;
+          st.custom_color = 0;
+          st.image_path = strdup(filename);
+
+          /* store bounding box corners in segments */
+          remfmt_seg sg1 = {
+              .x = left, .y = top, .width = width, .pressure = height};
+          kv_push(remfmt_seg, st.segments, sg1);
+
+          remfmt_seg sg2 = {.x = left + width,
+                            .y = top + height,
+                            .width = 0.0f,
+                            .pressure = 0.0f};
+          kv_push(remfmt_seg, st.segments, sg2);
+
+          kv_push(remfmt_stroke, *strokes, st);
+        }
+      }
+    }
+    b->pos = subblock_start + subblock_len;
+  }
+}
+
 static remfmt_stroke_vec *remfmt_parse_v6(rm_buf *b) {
   remfmt_stroke_vec *strokes = calloc(1, sizeof(remfmt_stroke_vec));
   if (strokes == NULL)
     return NULL;
+
+  remfmt_asset_mapping_vec assets;
+  kv_init(assets);
 
   b->pos = 43;
 
@@ -345,16 +484,88 @@ static remfmt_stroke_vec *remfmt_parse_v6(rm_buf *b) {
 
     size_t block_body_pos = b->pos;
 
-    if (block_type == 0x05) { // BlockTypeSceneLineItem
+    if (block_type == 0x05) { /* BlockTypeSceneLineItem */
       parse_scene_line_item(b, current_version, strokes, block_body_pos,
                             block_length);
-    } else if (block_type == 0x03) { // BlockTypeSceneGlyphItem
+    } else if (block_type == 0x03) { /* BlockTypeSceneGlyphItem */
       parse_scene_glyph_item(b, current_version, strokes, block_body_pos,
                              block_length);
+    } else if (block_type == 0x0F) { /* BlockTypeScenePathItem */
+      parse_scene_path_item(b, current_version, strokes, block_body_pos,
+                            block_length, &assets);
+    } else if (block_type == 0x0E) { /* SceneImageInfoBlock */
+      if (check_tag(b, 1, TAG_TYPE_LENGTH4)) {
+        read_tag(b, 1, TAG_TYPE_LENGTH4);
+        uint32_t subblock_len = read_uint32(b);
+        size_t subblock_start = b->pos;
+
+        uint64_t num_images = read_varuint(b);
+        for (uint64_t i = 0; i < num_images; i++) {
+          if (check_tag(b, 0, TAG_TYPE_LENGTH4)) {
+            read_tag(b, 0, TAG_TYPE_LENGTH4);
+            uint32_t entry_len = read_uint32(b);
+            size_t entry_start = b->pos;
+
+            uint8_t uuid[16];
+            for (int j = 0; j < 16; j++) {
+              uuid[j] = read_uint8(b);
+            }
+
+            char *filename = NULL;
+
+            /* read LWW string index 1 (filename) */
+            if (check_tag(b, 1, TAG_TYPE_LENGTH4)) {
+              read_tag(b, 1, TAG_TYPE_LENGTH4);
+              uint32_t lww_len = read_uint32(b);
+              size_t lww_start = b->pos;
+
+              uint8_t p1;
+              uint64_t p2;
+              if (read_tag(b, 1, TAG_TYPE_ID)) {
+                read_crdt_id(b, &p1, &p2);
+              }
+              if (check_tag(b, 2, TAG_TYPE_LENGTH4)) {
+                read_tag(b, 2, TAG_TYPE_LENGTH4);
+                uint32_t str_len = read_uint32(b);
+                size_t str_start = b->pos;
+
+                uint64_t string_length = read_varuint(b);
+                uint8_t is_ascii = read_uint8(b);
+                (void)is_ascii;
+
+                filename = malloc(string_length + 1);
+                for (uint64_t s = 0; s < string_length; s++) {
+                  filename[s] = (char)read_uint8(b);
+                }
+                filename[string_length] = '\0';
+
+                b->pos = str_start + str_len;
+              }
+              b->pos = lww_start + lww_len;
+            }
+
+            if (filename != NULL) {
+              remfmt_asset_mapping map;
+              memcpy(map.uuid, uuid, 16);
+              map.filename = filename;
+              kv_push(remfmt_asset_mapping, assets, map);
+            }
+
+            b->pos = entry_start + entry_len;
+          }
+        }
+        b->pos = subblock_start + subblock_len;
+      }
     }
 
     b->pos = block_body_pos + block_length;
   }
+
+  /* clean up assets */
+  for (int i = 0; i < kv_size(assets); i++) {
+    free(kv_A(assets, i).filename);
+  }
+  kv_destroy(assets);
 
   return strokes;
 }
@@ -492,6 +703,9 @@ void remfmt_stroke_cleanup(remfmt_stroke_vec *strokes) {
     remfmt_stroke st = kv_A(*strokes, i);
     if (kv_size(st.segments) > 0)
       kv_destroy(st.segments);
+    if (st.image_path != NULL) {
+      free(st.image_path);
+    }
   }
   kv_destroy(*strokes);
   free(strokes);

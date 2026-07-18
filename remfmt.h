@@ -46,6 +46,8 @@ typedef enum {
   HIGHLIGHTER_V2 = 18,
   CALLIGRAPHY = 21,
   SHADER = 23,
+
+  PEN_IMAGE = 99,
 } remfmt_pen;
 
 typedef struct {
@@ -55,6 +57,7 @@ typedef struct {
   char *template_dir;
   float canvas_width;
   float canvas_height;
+  char *asset_dir;
 } remfmt_render_params;
 
 typedef struct {
@@ -93,6 +96,7 @@ typedef struct {
 
   bool has_custom_color;
   uint32_t custom_color;
+  char *image_path;
 } remfmt_stroke;
 
 typedef kvec_t(remfmt_stroke) remfmt_stroke_vec;
@@ -106,6 +110,7 @@ float clampf(float f, float lo, float hi);
 float get_seg_width(remfmt_stroke *st, remfmt_seg *sg);
 float get_seg_alpha(remfmt_stroke *st, remfmt_seg *sg);
 unsigned map_v6_pen(unsigned pen_id);
+unsigned char *load_png_template(const char *filename, int *w, int *h);
 
 void remfmt_render_rm(FILE *stream, remfmt_stroke_vec *strokes);
 

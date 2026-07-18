@@ -67,6 +67,44 @@ void remfmt_render_svg(FILE *stream, remfmt_stroke_vec *strokes,
       remfmt_stroke st = kv_A(*strokes, i);
       set_pen_attr(&st);
 
+      if (st.pen == 99) { /* PEN_IMAGE */
+        if (kv_size(st.segments) > 0 && st.image_path != NULL) {
+          remfmt_seg sg1 = kv_A(st.segments, 0);
+          float xOffset = (st.version == 6) ? ((float)DEV_W / 2.0f) : 0.0f;
+          float x = sg1.x + xOffset - min_x;
+          float y = sg1.y - min_y;
+          float w = sg1.width;
+          float h = sg1.pressure;
+
+          float x_svg = x;
+          float y_svg = y;
+          float w_svg = w;
+          float h_svg = h;
+
+          if (prm && prm->landscape) {
+            x_svg = (float)port_h - (y + h);
+            y_svg = x;
+            w_svg = h;
+            h_svg = w;
+          }
+
+          sds full_path = sdsempty();
+          if (prm && prm->asset_dir) {
+            full_path =
+                sdscatprintf(full_path, "%s/%s", prm->asset_dir, st.image_path);
+          } else {
+            full_path = sdscatprintf(full_path, "%s", st.image_path);
+          }
+
+          fprintf(stream,
+                  "    <image href=\"%s\" x=\"%.3f\" y=\"%.3f\" width=\"%.3f\" "
+                  "height=\"%.3f\" />\n",
+                  full_path, x_svg, y_svg, w_svg, h_svg);
+          sdsfree(full_path);
+        }
+        continue;
+      }
+
       uint32_t seg_color;
       if (st.has_custom_color) {
         seg_color = st.custom_color;

@@ -23,6 +23,9 @@ static void render_xoj_page(gzFile gf, remfmt_stroke_vec *strokes,
     for (int i = 0; i < kv_size(*strokes); i++) {
       remfmt_stroke st = kv_A(*strokes, i);
       set_pen_attr(&st);
+      if (st.pen == 99) { /* PEN_IMAGE */
+        continue;
+      }
       if (kv_size(st.segments) == 0)
         continue;
 

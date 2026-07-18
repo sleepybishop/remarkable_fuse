@@ -543,6 +543,103 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
     for (int i = 0; i < kv_size(*strokes); i++) {
       remfmt_stroke *st = &kv_A(*strokes, i);
       int num_points = kv_size(st->segments);
+
+      if (st->pen == 99) { /* PEN_IMAGE */
+        if (num_points > 0 && st->image_path != NULL) {
+          float dev_w_st = (prm && prm->canvas_width > 0.0f) ? prm->canvas_width
+                                                             : (float)DEV_W;
+          float xOffset = (st->version == 6) ? (dev_w_st / 2.0f) : 0.0f;
+          remfmt_seg sg1 = kv_A(st->segments, 0);
+          float left = sg1.x + xOffset - min_x;
+          float top = sg1.y - min_y;
+          float w = sg1.width;
+          float h = sg1.pressure;
+
+          sds full_path = sdsempty();
+          if (prm && prm->asset_dir) {
+            full_path = sdscatprintf(full_path, "%s/%s", prm->asset_dir,
+                                     st->image_path);
+          } else {
+            full_path = sdscatprintf(full_path, "%s", st->image_path);
+          }
+
+          int img_w = 0, img_h = 0;
+          unsigned char *img_data =
+              load_png_template(full_path, &img_w, &img_h);
+          sdsfree(full_path);
+
+          if (img_data != NULL) {
+            /* draw image */
+            for (int dy = 0; dy < (int)h; dy++) {
+              int unrot_y = (int)top + dy;
+              int src_y = (dy * img_h) / (int)h;
+              if (src_y < 0 || src_y >= img_h)
+                continue;
+
+              for (int dx = 0; dx < (int)w; dx++) {
+                int unrot_x = (int)left + dx;
+                int src_x = (dx * img_w) / (int)w;
+                if (src_x < 0 || src_x >= img_w)
+                  continue;
+
+                int rx = unrot_x;
+                int ry = unrot_y;
+                if (prm && prm->landscape) {
+                  rx = (int)port_h - unrot_y;
+                  ry = unrot_x;
+                }
+
+                if (rx >= 0 && rx < width && ry >= 0 && ry < height) {
+                  int src_idx = (src_y * img_w + src_x) * 3;
+                  int dst_idx = ry * width + rx;
+                  canvas[dst_idx].r = img_data[src_idx];
+                  canvas[dst_idx].g = img_data[src_idx + 1];
+                  canvas[dst_idx].b = img_data[src_idx + 2];
+                }
+              }
+            }
+            free(img_data);
+          } else {
+            /* draw fallback placeholder */
+            for (int dy = 0; dy < (int)h; dy++) {
+              for (int dx = 0; dx < (int)w; dx++) {
+                int unrot_x = (int)left + dx;
+                int unrot_y = (int)top + dy;
+
+                int rx = unrot_x;
+                int ry = unrot_y;
+                if (prm && prm->landscape) {
+                  rx = (int)port_h - unrot_y;
+                  ry = unrot_x;
+                }
+
+                if (rx >= 0 && rx < width && ry >= 0 && ry < height) {
+                  int dst_idx = ry * width + rx;
+                  bool is_border = (dx == 0 || dx == (int)w - 1 || dy == 0 ||
+                                    dy == (int)h - 1);
+                  bool is_diagonal =
+                      (abs(dx - dy) < 2 || abs(dx - ((int)h - dy)) < 2);
+                  if (is_border) {
+                    canvas[dst_idx].r = 128;
+                    canvas[dst_idx].g = 128;
+                    canvas[dst_idx].b = 128;
+                  } else if (is_diagonal) {
+                    canvas[dst_idx].r = 200;
+                    canvas[dst_idx].g = 200;
+                    canvas[dst_idx].b = 200;
+                  } else {
+                    canvas[dst_idx].r = 240;
+                    canvas[dst_idx].g = 240;
+                    canvas[dst_idx].b = 240;
+                  }
+                }
+              }
+            }
+          }
+        }
+        continue;
+      }
+
       if (num_points == 0)
         continue;
 

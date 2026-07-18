@@ -109,11 +109,14 @@ cache_entry *generate_annotated_pdf(remfs_ctx *ctx, uuid_map_node *ref,
           int overlay_margins = 0;
           remfmt_stroke_vec *strokes = remfmt_parse(rm_path);
           if (strokes) {
+            sds asset_dir = sdscatprintf(sdsempty(), "%s/%s", ctx->src_dir,
+                                         ref->file->uuid);
             remfmt_render_params prm = {.landscape = page->file->landscape,
                                         .template_name =
                                             page->file->template_name,
                                         .template_dir = template_dir,
-                                        .annotation = true};
+                                        .annotation = true,
+                                        .asset_dir = asset_dir};
             if (ref->file->custom_zoom_page_height > 0 &&
                 ref->file->custom_zoom_page_width > 0) {
               prm.canvas_width = ref->file->custom_zoom_page_width;
@@ -126,6 +129,7 @@ cache_entry *generate_annotated_pdf(remfs_ctx *ctx, uuid_map_node *ref,
             }
 
             remfmt_render_png(png_fp, strokes, &prm);
+            sdsfree(asset_dir);
             remfmt_stroke_cleanup(strokes);
           }
           fclose(png_fp);
@@ -224,6 +228,8 @@ cache_entry *generate_notebook_pdf(remfs_ctx *ctx, uuid_map_node *ref) {
       pages_prms[idx]->template_name = page->file->template_name;
       pages_prms[idx]->template_dir = template_dir;
       pages_prms[idx]->annotation = false;
+      pages_prms[idx]->asset_dir =
+          sdscatprintf(sdsempty(), "%s/%s", ctx->src_dir, ref->file->uuid);
       idx++;
     }
   }
@@ -236,6 +242,9 @@ cache_entry *generate_notebook_pdf(remfs_ctx *ctx, uuid_map_node *ref) {
       remfmt_stroke_cleanup(pages_strokes[i]);
     }
     if (pages_prms[i]) {
+      if (pages_prms[i]->asset_dir) {
+        sdsfree(pages_prms[i]->asset_dir);
+      }
       free(pages_prms[i]);
     }
   }
@@ -263,10 +272,17 @@ cache_entry *generate_fake_ext(uuid_map_node *ref, const char *rmpath,
 
   remfmt_stroke_vec *strokes = remfmt_parse(rmpath);
   if (strokes) {
+    char *last_slash = strrchr(rmpath, '/');
+    sds asset_dir = NULL;
+    if (last_slash != NULL) {
+      size_t len = last_slash - rmpath;
+      asset_dir = sdsnewlen(rmpath, len);
+    }
     remfmt_render_params prm = {.landscape = ref->file->landscape,
                                 .template_name = ref->file->template_name,
                                 .template_dir = template_dir,
-                                .annotation = anot};
+                                .annotation = anot,
+                                .asset_dir = asset_dir};
     if (strcmp(ext, "svg") == 0) {
       remfmt_render_svg(sh, strokes, &prm);
     } else if (strcmp(ext, "pdf") == 0) {
@@ -275,6 +291,9 @@ cache_entry *generate_fake_ext(uuid_map_node *ref, const char *rmpath,
       remfmt_render_xoj(sh, strokes, &prm);
     } else {
       remfmt_render_png(sh, strokes, &prm);
+    }
+    if (asset_dir) {
+      sdsfree(asset_dir);
     }
     remfmt_stroke_cleanup(strokes);
   }
