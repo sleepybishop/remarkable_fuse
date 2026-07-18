@@ -51,6 +51,9 @@ float clampf(float f, float lo, float hi) {
 }
 
 float get_seg_width(remfmt_stroke *st, remfmt_seg *sg) {
+  if (sg->width < 0.01f) {
+    return st->calc_width;
+  }
   float width;
   switch (st->pen) {
   default:

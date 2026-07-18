@@ -718,7 +718,8 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
           x = rx;
           y = ry;
         }
-        float r = (pt.width * st->width * bm.width_scale) / 4.0f;
+        float w = (pt.width < 0.01f) ? st->width : pt.width;
+        float r = (w * st->width * bm.width_scale) / 4.0f;
         if (r < 0.5f)
           r = 0.5f;
 
@@ -745,8 +746,10 @@ void remfmt_render_png(FILE *stream, remfmt_stroke_vec *strokes,
             y2 = ry2;
           }
 
-          float segWidth = ((prev.width + curr.width) / 2.0f) *
-                           (st->width / 2.0f) * bm.width_scale * 0.5f;
+          float w1 = (prev.width < 0.01f) ? st->width : prev.width;
+          float w2 = (curr.width < 0.01f) ? st->width : curr.width;
+          float segWidth =
+              ((w1 + w2) / 2.0f) * (st->width / 2.0f) * bm.width_scale * 0.5f;
           if (segWidth < 0.4f)
             segWidth = 0.4f;
 

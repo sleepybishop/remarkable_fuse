@@ -135,7 +135,7 @@ static void parse_scene_line_item(rm_buf *b, uint8_t version,
     size_t subblock_start = b->pos;
 
     uint8_t item_type = read_uint8(b);
-    if (item_type == 0x03) { // line item
+    if (item_type == 0x03) { /* line item */
       if (!read_tag(b, 1, TAG_TYPE_BYTE4))
         goto skip_subblock;
       uint32_t tool_id = read_uint32(b);
