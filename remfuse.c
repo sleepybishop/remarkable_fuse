@@ -219,7 +219,13 @@ static int remfuse_getattr_internal(remfs_ctx *ctx, const char *path,
   return ret;
 }
 
+#if FUSE_USE_VERSION >= 30
+static int remfuse_getattr(const char *path, struct stat *stbuf,
+                           struct fuse_file_info *fi) {
+  (void)fi;
+#else
 static int remfuse_getattr(const char *path, struct stat *stbuf) {
+#endif
   struct fuse_context *fuse_ctx = fuse_get_context();
   remfs_ctx *ctx = (remfs_ctx *)fuse_ctx->private_data;
   pthread_mutex_lock(&remfs_mutex);
@@ -993,7 +999,13 @@ static int remfuse_write(const char *path, const char *buf, size_t size,
   return ret;
 }
 
+#if FUSE_USE_VERSION >= 30
+static int remfuse_truncate(const char *path, off_t size,
+                            struct fuse_file_info *fi) {
+  (void)fi;
+#else
 static int remfuse_truncate(const char *path, off_t size) {
+#endif
   if (!enable_mutable)
     return -EROFS;
 
@@ -1285,7 +1297,13 @@ static int remfuse_create(const char *path, mode_t mode,
   }
 }
 
+#if FUSE_USE_VERSION >= 30
+static int remfuse_utimens(const char *path, const struct timespec tv[2],
+                           struct fuse_file_info *fi) {
+  (void)fi;
+#else
 static int remfuse_utimens(const char *path, const struct timespec tv[2]) {
+#endif
   return 0;
 }
 
